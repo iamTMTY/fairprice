@@ -51,6 +51,16 @@ ollama pull gemma4
 
 Check that Ollama is running and has the model: `ollama list` should show `gemma4:latest`.
 
+**Ollama on another machine.** If your computer cannot run the model (it needs about 10 GB of memory), run Ollama on a machine that can, such as a server with a GPU, and point FairPrice at it with `OLLAMA_HOST`, the same setting Ollama's own tools use:
+
+```bash
+OLLAMA_HOST=http://gpu-server:11434      # put this line in .env (see step 4), or export it
+```
+
+On that machine, start Ollama so other computers can reach it (`OLLAMA_HOST=0.0.0.0 ollama serve`) and run `ollama pull gemma4` there. Keep it on your own network: bid prices are sent to the model.
+
+**Another model.** Set `FAIRPRICE_MODEL`, for example `FAIRPRICE_MODEL=ollama:qwen3:8b` (after `ollama pull qwen3:8b`). The evals in EVALS.md were measured with `gemma4`; other models will behave differently.
+
 ### 3. Get the code
 
 ```bash
@@ -60,7 +70,25 @@ cd fairprice
 
 (No git? Download the ZIP from the repository page, unzip it, and `cd` into the folder.)
 
-### 4. Run it
+### 4. Check the setup
+
+```bash
+cp .env.example .env     # optional: every setting has a default; edit it to change the model or OLLAMA_HOST
+uv run fairprice --check
+```
+
+```
+✓ Model ollama:gemma4 at http://localhost:11434
+• Procurement data: not built yet; the first run downloads about 60 MB, or run `uv run fairprice-ingest`
+• Borrowed DuckDB MCP server: downloads on the first run (needs internet once)
+✓ Reports: local storage, xlsx files
+✓ Database for runs, reports and the audit log: reachable
+Ready.
+```
+
+Anything marked ✗ comes with the fix, for example `Ollama is not reachable at http://localhost:11434 … Install it from https://ollama.com/download and open it, or set OLLAMA_HOST to where it runs` or `Run ollama pull gemma4`. Every run makes the same check first and stops with the same message instead of failing halfway.
+
+### 5. Run it
 
 ```bash
 uv run fairprice "Toyota Hilux double cabin pickup" --unit-price 120000000 --year 2025
@@ -72,6 +100,14 @@ That is the one command. The first time, it also:
 2. downloads about 60 MB of public procurement data (every Nigerian and Kenyan publication) and builds a local database in `data/` (a few minutes).
 
 After that, everything runs offline. Each item takes about 2 minutes on the laptop above.
+
+**Cost of a run.** Every run ends with what it cost, for example:
+
+```
+Cost of this run: 9 model calls, 41,203 input and 1,876 output tokens, 98 s of model time, API fees USD 0.00 (local model).
+```
+
+The same figures are stored with the report (in its JSON, under `report.cost`) and in the audit log (`uv run fairprice --audit <run id>`). With a local model there are no API fees. If you point FairPrice at a paid provider, set its prices (`FAIRPRICE_PRICE_PER_MILLION_INPUT_TOKENS`, `FAIRPRICE_PRICE_PER_MILLION_OUTPUT_TOKENS`, `FAIRPRICE_PRICE_CURRENCY`) and the fee is worked out per run. EVALS.md gives measured tokens per run for each eval task.
 
 At the end, a short summary is printed with the draft report's location; open it in Excel, Numbers or LibreOffice (or set `FAIRPRICE_OPEN_DRAFT=1` to open it automatically). It is saved as `reports/DRAFT-<item>-<run id>.xlsx` and marked "DRAFT – not approved". Then you pick a decision with the arrow keys and Enter, or by pressing 1, 2 or 3:
 
@@ -172,6 +208,9 @@ Put settings in a `.env` file next to `pyproject.toml` (copy `.env.example`, whi
 | `FAIRPRICE_SQL_URL` | `sqlite:///data/runs.sqlite` | Where the audit log is kept, as a SQLAlchemy URL, e.g. `postgresql+psycopg://user:password@host/fairprice` (install that database's driver). Tested on SQLite only. Run state for `--resume` stays in `data/runs.sqlite`. |
 | `FAIRPRICE_REPORT_FORMAT` | `xlsx` | The report file format: `xlsx`, `csv` or `json`. `--format` overrides it for one run. |
 | `FAIRPRICE_OPEN_DRAFT` | `0` | Set to `1` to open the draft report automatically in Excel or Numbers. |
+| `OLLAMA_HOST` | `http://localhost:11434` | Where Ollama runs, if not on this computer. |
+| `FAIRPRICE_MODEL` | `ollama:gemma4` | The model, as `provider:model`. |
+| `FAIRPRICE_PRICE_PER_MILLION_INPUT_TOKENS`, `…_OUTPUT_TOKENS`, `FAIRPRICE_PRICE_CURRENCY` | `0`, `0`, `USD` | Prices for working out API fees per run, if you use a paid provider. |
 
 With S3 storage, the draft and approved reports are shown as download links that work for one hour.
 
@@ -204,7 +243,7 @@ The person sees what they are approving, chooses, and gives their name; the repo
 
 | Message | Fix |
 |---|---|
-| `Connection refused` or `connect error` | Ollama is not running. Open the Ollama app, or run `ollama serve` in another terminal. |
+| `Ollama is not reachable at …` | Ollama is not running, or runs elsewhere. Open the Ollama app, run `ollama serve`, or set `OLLAMA_HOST`. `uv run fairprice --check` shows what is wrong. |
 | `model "gemma4" not found` | Run `ollama pull gemma4`. |
 | The first run stops while downloading or building | Run the same command again. Finished downloads are kept; an unfinished build starts over. |
 | `… was not read: it does not match the bid package format` | Fix each listed problem; the templates in `examples/` show the exact layout. |
