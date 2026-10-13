@@ -16,27 +16,33 @@ HILUX = "SELECT id FROM lines WHERE description LIKE 'Supply of Toyota Hilux dou
 BASE = {"currency": "NGN", "year": 2025, "country": "NG"}
 
 
-def state(item, price, candidates, challenge=None, searches=None, **extra):
-    req = {**BASE, "item": item, "unit_price": price}
-    return {"request": req, "final": server.check_price_comparability(price, "NGN", 2025, candidates, **extra),
-            "challenge": challenge or {"verdict": "STANDS", "reason": "fine", "remove": {}},
-            "searches": searches or [{"keywords": ["hilux"], "country": "NG", "matches": 11}]}
+def checked(run, line, candidates, rejected=None):
+    """A line searched and checked through the run's own tools (the search step stands in for find_comparables)."""
+    db.add_step(run, line, "search", {"keywords": ["hilux"], "country": "NG", "matches": 11, "ids": candidates})
+    return server.check_price_comparability(run, candidates, rejected, line)
 
 
-@pytest.fixture
-def package():
+def package_run(title="pkg"):
     """Two lines, three bidders: one line with a band, one with too few records, and one bidder missing a line."""
     lines = [{"line": "1", "item": "Toyota Hilux double cabin pickup", "quantity": 2,
               "prices": {"A": 95e6, "B": 300e6, "C": 40e6}},
              {"line": "2", "item": "Laptop computer", "quantity": 10, "prices": {"A": 2e6, "B": 2.1e6}}]
-    bundle = ids("SELECT id FROM lines WHERE description LIKE '%Prado%'")
-    states = {"1": state("Toyota Hilux double cabin pickup", 95e6, ids(HILUX) + bundle,
-                         rejected={str(bundle[0]): "Challenger: bundle"}),
-              "2": state("Laptop computer", 2e6, ids("SELECT id FROM lines WHERE description LIKE 'Laptop computer%'"))}
     checks = [{"check": "arithmetic_error", "bidder": "B", "line": "1", "where": "sheet “B”, row 2",
                "data": {"quantity": 2, "unit_price": 300e6, "total": 700e6}},
               {"check": "missing_line", "bidder": "C", "line": "2", "where": None, "data": {"item": "Laptop computer"}}]
-    return lines, states, ["A", "B", "C"], checks
+    run = db.start_run("package", title, BASE, lines, ["A", "B", "C"], checks)
+    bundle = ids("SELECT id FROM lines WHERE description LIKE '%Prado%'")
+    checked(run, "1", ids(HILUX) + bundle, {str(bundle[0]): "Challenger: bundle"})
+    server.challenge_review(run, "STANDS", "fine")
+    checked(run, "2", ids("SELECT id FROM lines WHERE description LIKE 'Laptop computer%'"))
+    return run
+
+
+@pytest.fixture
+def package():
+    run = package_run()
+    record, lines, states = server.review(run)
+    return lines, states, record.bidders, record.checks
 
 
 def test_money_and_ranges():
@@ -88,7 +94,7 @@ def test_report_data_cites_its_records_and_never_ranks(package):
     assert data["report"]["status"] == "draft" and data["report"]["prepared_by"] == "FairPrice (ollama:gemma4)"
     assert [p["bidder"] for p in data["prices"][:3]] == bidders  # the file's order, not ranked
     assert data["prices"][0]["sources"] and data["prices"][2]["result"] == "Well below past prices"
-    assert len(report.cited(data)) == len(data["sources"]) >= 8
+    assert len({s["record_id"] for s in data["sources"]}) == len(data["sources"]) >= 8
     assert data["report"]["bid_file_checks"][1] == "C did not price line 2 (Laptop computer)."
     assert not any("rank" in k or "total" in k for k in data["prices"][0])
     single = report.build("x", *report.single(states["1"]), None, states["1"]["request"], "run2")
@@ -123,55 +129,55 @@ def test_three_file_formats(package):
     assert report.files(empty, "E", "csv")["E-sources.csv"].decode("utf-8-sig").startswith("Status")
 
 
-def test_draft_approve_retrieve_and_reject(package, monkeypatch):
-    lines, states, bidders, checks = package
+def test_draft_approve_retrieve_and_reject(monkeypatch):
     for fmt in report.FORMATS:
         monkeypatch.setenv("FAIRPRICE_REPORT_FORMAT", fmt)
-        name = report.draft_name("Bid Package!", f"r{fmt}")
-        assert name == f"DRAFT-bid-package-r{fmt}"
-        agent.save_draft(f"r{fmt}", name, report.build("pkg", lines, states, bidders, checks, BASE, f"r{fmt}"), "summary")
-        assert server.write_price_review(name)["status"] == "needs_approval"  # no person, no approval
-        saved = server.write_price_review(name, db.grant("write_price_review", name, "Ada Obi"))
-        assert saved["saved"].endswith(f"bid-package-r{fmt}") and saved["sources"] >= 8
-        got = server.get_price_review(saved["saved"])
+        run = package_run("Bid Package!")
+        asked = server.write_price_review(run)  # no person, no approval: a draft and a request
+        assert asked["status"] == "needs_approval" and asked["draft"] == f"DRAFT-bid-package-{run}"
+        assert storage().load(asked["files"][0].rsplit("/", 1)[-1])
+        db.decide(asked["request"], True, "Ada Obi")
+        saved = server.write_price_review(run, asked["request"])
+        assert saved["saved"].endswith(f"bid-package-{run}") and saved["sources"] >= 8
+        got = server.get_price_review(run)
         assert got["report"]["approved_by"] == "Ada Obi" and got["files"]
-        assert any(r["name"] == saved["saved"] for r in server.get_price_review()["reports"])
+        assert got["lines"][0]["second_check"]["verdict"] == "STANDS"
+        assert any(r["run_id"] == run for r in server.get_price_review()["reports"])
         with pytest.raises(Exception):
-            storage().load(f"{name}.xlsx" if fmt == "xlsx" else f"{name}.json" if fmt == "json" else f"{name}-prices.csv")
-    agent.save_draft("rj", "DRAFT-rejected-rj", report.build("pkg", lines, states, bidders, checks, BASE, "rj"), "")
-    agent.discard_draft("rj", "DRAFT-rejected-rj")
-    assert "not a draft" in server.write_price_review("DRAFT-rejected-rj", "x")["error"]
+            storage().load(asked["files"][0].rsplit("/", 1)[-1])
+    run = package_run("rejected")
+    asked = server.write_price_review(run)
+    server.discard_review(run)  # the person rejected it
+    db.decide(asked["request"], True, "Ada")  # too late: the request was cancelled with its draft
+    assert "not an unused human approval" in server.write_price_review(run, asked["request"])["error"]
     assert "No approved report" in server.get_price_review("nothing")["error"]
+    assert "No review" in server.write_price_review("nothing")["error"]
 
 
-def test_approval_refusals(package):
-    lines, states, bidders, checks = package
-    data = report.build("pkg", lines, states, bidders, checks, BASE, "rf")
-    approve = lambda name: db.grant("write_price_review", name, "Ada")
-    agent.save_draft("rf", "DRAFT-refusals-rf", data, "")
-    assert "not an unused human approval" in server.write_price_review("DRAFT-refusals-rf", "made-up")["error"]
-    other = approve("DRAFT-something-else")
-    assert "not an unused human approval" in server.write_price_review("DRAFT-refusals-rf", other)["error"]
-    first = server.write_price_review("DRAFT-refusals-rf")["request"]
-    assert server.write_price_review("DRAFT-refusals-rf")["request"] == first  # the same request, not a new one
-    no_sources = {**data, "sources": []}
-    agent.save_draft("rf2", "DRAFT-nosources-rf2", no_sources, "")
-    assert "cites no source records" in server.write_price_review("DRAFT-nosources-rf2", approve("DRAFT-nosources-rf2"))["error"]
-    bogus = {**data, "sources": [{**data["sources"][0], "record_id": 999999999}]}
-    agent.save_draft("rf3", "DRAFT-bogus-rf3", bogus, "")
-    assert "do not exist: [999999999]" in server.write_price_review("DRAFT-bogus-rf3", approve("DRAFT-bogus-rf3"))["error"]
+def test_approval_refusals():
+    run = package_run("refusals")
+    assert "not an unused human approval" in server.write_price_review(run, "made-up")["error"]
+    other = db.grant("write_price_review", f"{package_run('other')}@1", "Ada")
+    assert "not an unused human approval" in server.write_price_review(run, other)["error"]
+    first = server.write_price_review(run)["request"]
+    second = server.write_price_review(run)["request"]  # a new draft cancels the old one and its request
+    db.decide(first, True, "Ada")
+    assert "not an unused human approval" in server.write_price_review(run, first)["error"]
+    db.decide(second, True, "Ada")
+    checked(run, "2", ids("SELECT id FROM lines WHERE description LIKE 'Laptop computer%'"))  # the review changed
+    assert "not an unused human approval" in server.write_price_review(run, second)["error"]
+    empty = db.start_run("item", "nothing yet", BASE, [{"line": "1", "item": "x", "quantity": None, "prices": {"P": 1}}], ["P"])
+    assert "nothing to report" in server.write_price_review(empty)["error"]
 
 
-def test_opening_the_draft_only_when_asked(package, monkeypatch):
-    lines, states, bidders, checks = package
-    data = report.build("pkg", lines, states, bidders, checks, BASE, "op")
+def test_opening_the_draft_only_when_asked(monkeypatch):
     with mock.patch("subprocess.run") as run:
-        agent.save_draft("op", "DRAFT-open-op", data, "")
+        agent.open_draft("R.xlsx")
         run.assert_not_called()
         monkeypatch.setenv("FAIRPRICE_OPEN_DRAFT", "1")
-        agent.save_draft("op", "DRAFT-open-op", data, "")
+        agent.open_draft("R.xlsx")
         run.assert_called_once()
     monkeypatch.setattr("sys.platform", "win32")
     with mock.patch("os.startfile", create=True) as start:
-        agent.save_draft("op", "DRAFT-open-op", data, "")
+        agent.open_draft("R.xlsx")
     start.assert_called_once()

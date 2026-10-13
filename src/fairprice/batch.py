@@ -2,6 +2,7 @@
 
 Usage:
   uv run fairprice --package examples/bid-package.xlsx --year 2025     (or .csv, or .json)
+  or, from any MCP client, the start_package_review tool with the package as JSON
 
 A package must match bid_package.schema.json exactly; one that does not is refused with every problem and where it
 is, never interpreted. The three forms of the same package:
@@ -17,7 +18,6 @@ import csv
 import json
 import re
 import statistics
-import uuid
 from itertools import combinations
 from pathlib import Path
 
@@ -25,7 +25,7 @@ import jsonschema
 from openpyxl import load_workbook
 
 from fairprice import agent, report
-from fairprice.db import grant
+from fairprice.db import get_run, start_run
 
 MIN_IDENTICAL = 2  # ponytail: fixed threshold for the identical-prices pattern; tune with committee feedback
 SCHEMA = json.loads(Path(__file__).with_name("bid_package.schema.json").read_text())
@@ -144,19 +144,12 @@ def locate(path, where):
     return "".join(f"[{p}]" if isinstance(p, int) else f".{p}" for p in path).lstrip(".") or "the package"
 
 
-def load(path):
-    """Read a bid package (.xlsx, .csv or .json) into the schema's form, or raise PackageError with every problem.
-    Returns (package, where): where maps each row to its location in the file, for findings to cite."""
-    readers = {".xlsx": read_xlsx, ".csv": read_csv, ".json": read_json}
-    if Path(path).suffix.lower() not in readers:
-        raise PackageError(path, [f"use .xlsx, .csv or .json, not {Path(path).suffix or 'no extension'}"])
-    if not Path(path).is_file():
-        raise PackageError(path, ["file not found"])
-    problems = []
-    package, where = readers[Path(path).suffix.lower()](path, problems)
-    if not problems:
-        problems += [f"{locate(list(e.absolute_path), where)}: {e.message}"
-                     for e in jsonschema.Draft202012Validator(SCHEMA).iter_errors(package)]
+def validate(package, where=None, label="package"):
+    """Check a package (the schema's form) against the schema and the rules it cannot express; raise PackageError
+    with every problem and where it is. Returns the package with line numbers as text."""
+    where = where or {}
+    problems = [f"{locate(list(e.absolute_path), where)}: {e.message}"
+                for e in jsonschema.Draft202012Validator(SCHEMA).iter_errors(package)]
     if not problems:  # rules the schema cannot express
         lines = [str(r["line"]) for r in package["boq"]]
         problems += [f"BoQ line {n} appears more than once" for n in sorted({n for n in lines if lines.count(n) > 1})]
@@ -172,18 +165,33 @@ def load(path):
                     problems.append(f"{at}: line {line} is priced twice")
                 seen.add(line)
     if problems:
-        raise PackageError(path, problems)
+        raise PackageError(label, problems)
     for r in package["boq"]:
         r["line"] = str(r["line"])
     for bid in package["bids"]:
         for r in bid["lines"]:
             r["line"] = str(r["line"])
-    return package, where
+    return package
 
 
-def read_package(path):
+def load(path):
+    """Read a bid package (.xlsx, .csv or .json) into the schema's form, or raise PackageError with every problem.
+    Returns (package, where): where maps each row to its location in the file, for findings to cite."""
+    readers = {".xlsx": read_xlsx, ".csv": read_csv, ".json": read_json}
+    if Path(path).suffix.lower() not in readers:
+        raise PackageError(path, [f"use .xlsx, .csv or .json, not {Path(path).suffix or 'no extension'}"])
+    if not Path(path).is_file():
+        raise PackageError(path, ["file not found"])
+    problems = []
+    package, where = readers[Path(path).suffix.lower()](path, problems)
+    if problems:
+        raise PackageError(path, problems)
+    return validate(package, where, path), where
+
+
+def unpack(package, where=None):
     """(boq rows, {bidder: rows}) for the checks and the agent; each row carries where it is in the file."""
-    package, where = load(path)
+    where = where or {}
     boq = [{"where": locate(["boq", i], where), "line": r["line"], "item": r["item"], "quantity": r["quantity"]}
            for i, r in enumerate(package["boq"])]
     bidders = {bid["bidder"]: [{"where": locate(["bids", j, "lines", k], where), "line": r["line"],
@@ -192,6 +200,10 @@ def read_package(path):
                                for k, r in enumerate(bid["lines"])]
                for j, bid in enumerate(package["bids"])}
     return boq, bidders
+
+
+def read_package(path):
+    return unpack(*load(path))
 
 
 def describe(path, boq, bidders):
@@ -241,9 +253,11 @@ def file_checks(boq, bidders):
     return found
 
 
-async def analyse(graph, lines, base, batch_id, feedback="", attempt=0, only=None, usage=None):
-    """Run the agent (up to the draft, no gate) once per distinct item; return {line: state}."""
+async def analyse(graph, lines, base, run_id, feedback="", attempt=0, only=None, usage=None):
+    """Run the agent (up to the draft, no gate) once per distinct item of the run; return {line: state}.
+    Every search and check is recorded under the run, line by line."""
     states, by_item = {}, {}
+    agent.CURRENT_RUN = run_id
     for n, entry in enumerate(lines):
         if only is not None and entry["line"] not in only:
             continue
@@ -253,19 +267,19 @@ async def analyse(graph, lines, base, batch_id, feedback="", attempt=0, only=Non
         if key in by_item:  # the same item on another line: one band serves both
             states[entry["line"]] = by_item[key]
             continue
-        thread = agent.CURRENT_RUN = f"{batch_id}-{n}" + (f"-r{attempt}" if attempt else "")
+        thread = f"{run_id}-{n}" + (f"-r{attempt}" if attempt else "")
         config = {"configurable": {"thread_id": thread}, "callbacks": [usage] if usage else []}
-        req = {**base, "item": entry["item"], "unit_price": statistics.median(entry["prices"].values())}
+        req = {**base, "run_id": run_id, "line": entry["line"], "item": entry["item"],
+               "unit_price": statistics.median(entry["prices"].values())}
         snapshot = await graph.aget_state(config)
         if snapshot.values.get("final") is not None:
-            print(f"Line {entry['line']}: reusing the finished result of run {thread}")
+            print(f"Line {entry['line']}: reusing the finished result")
         else:
-            print(f"\nLine {entry['line']}: {entry['item']} (run {thread})", flush=True)
-            agent.audit(thread, event="run_started", request=req, batch=batch_id, line=entry["line"])
+            print(f"\nLine {entry['line']}: {entry['item']}", flush=True)
             try:
                 await graph.ainvoke({"request": req, "feedback": feedback}, config, interrupt_after=["recheck"])
             except Exception as e:  # one failed line must not stop the batch
-                agent.audit(thread, event="line_failed", error=repr(e))
+                agent.audit(run_id, event="line_failed", line=entry["line"], error=repr(e))
                 print(f"  ! line {entry['line']} failed: {e!r}", flush=True)
                 by_item[key] = states[entry["line"]] = {"request": req, "error": repr(e)[:300]}
                 continue
@@ -274,44 +288,39 @@ async def analyse(graph, lines, base, batch_id, feedback="", attempt=0, only=Non
 
 
 async def run(args):
-    batch_id = args.resume or uuid.uuid4().hex[:12]
     try:
-        boq, bidders = read_package(args.sheet)
+        package, where = load(args.sheet)
     except PackageError as e:
         raise SystemExit(str(e))
+    boq, bidders = unpack(package, where)
     print(describe(args.sheet, boq, bidders))
     lines = package_lines(boq, bidders)
-    checks = file_checks(boq, bidders)
+    checks = file_checks(boq, bidders)  # with the file's sheet and row for each problem
     names = list(bidders)
-    base = {"currency": args.currency, "year": args.year, "country": args.country}
-    print(f"Batch {batch_id} | model {agent.MODEL} | {len(lines)} lines, {len(bidders)} bidders")
-    agent.audit(batch_id, event="batch_started", sheet=str(args.sheet), bidders=names, lines=len(lines),
+    base = {"currency": args.currency.upper(), "year": args.year, "country": args.country.upper()}
+    run_id = args.resume if args.resume and get_run(args.resume) else start_run(
+        "package", Path(args.sheet).name, base, lines, names, checks)
+    print(f"Review {run_id} | model {agent.MODEL} | {len(lines)} lines, {len(bidders)} bidders")
+    agent.audit(run_id, event="run_started", sheet=str(args.sheet), bidders=names, lines=len(lines),
                 file_checks=checks, model=agent.MODEL)
+
+    def which_lines():
+        redo = input("Which line numbers? (comma-separated, blank for all): ").replace(" ", "")
+        return redo.split(",") if redo else None
     async with agent.session() as (graph, tools):
         usage = agent.Usage()
-        states = await analyse(graph, lines, base, batch_id, usage=usage)
+        states = await analyse(graph, lines, base, run_id, usage=usage)
         attempt = 0
-        draft = report.draft_name(Path(args.sheet).stem, batch_id)
         while True:
-            data = report.build(Path(args.sheet).name, lines, states, names, checks, base, batch_id, agent.MODEL)
-            data["report"]["cost"] = usage.summary()
-            agent.save_draft(batch_id, draft, data, report.summary(lines, states, names, checks, base) + "\n\n" + usage.line())
-            decision = agent.ask_decision()
-            if decision["action"] == "revise":
-                redo = input("Which line numbers? (comma-separated, blank for all): ").replace(" ", "")
-                decision["lines"] = redo.split(",") if redo else None
-            if decision["action"] == "approve":  # the person at this menu is the approval write_price_review needs
-                decision["approval"] = grant("write_price_review", draft, decision["name"])
-            agent.audit(batch_id, event="human_decision", **decision)
-            if decision["action"] != "approve":
-                agent.discard_draft(batch_id, draft)
+            decision = await agent.gate(run_id, tools, report.summary(lines, states, names, checks, base), usage,
+                                        ask_lines=which_lines)
             if decision["action"] != "revise":
                 break
             attempt += 1
-            states |= await analyse(graph, lines, base, batch_id, decision["feedback"], attempt, decision["lines"], usage)
+            states |= await analyse(graph, lines, base, run_id, decision["feedback"], attempt, decision["lines"], usage)
         saved = None
         if decision["action"] == "approve":
-            result = await tools["write_price_review"].ainvoke({"report": draft, "approval": decision["approval"]})
+            result = await tools["write_price_review"].ainvoke({"run_id": run_id, "approval": decision["approval"]})
             saved = agent.tool_text(result)
         print(saved or "Not saved: the reviewer rejected the draft.")
-        agent.audit(batch_id, event="batch_finished", saved=saved, cost=usage.summary())
+        agent.audit(run_id, event="run_finished", saved=saved, cost=usage.summary())

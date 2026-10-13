@@ -192,20 +192,18 @@ class ScriptedModel(BaseChatModel):
                 msg = AIMessage(text + (self.verdict or "The band looks odd."))
             return ChatResult(generations=[ChatGeneration(message=msg)])
         item = re.search(r"Item under review: (.+)", system).group(1).strip()
-        country = re.search(r"Country of the data to search: (\w+)", system).group(1)
-        price = float(re.search(r"Price under review: ([\d.]+)", system).group(1))
         last = messages[-1]
+        first = self.keywords.get(item, [item.split()[0]])
         searches = sum(t.name == "find_comparables" for t in tools)
-        if isinstance(last, HumanMessage) or not tools:
-            words = self.keywords.get(item, [item.split()[0]]) if searches == 0 else [item.split()[-1]]
-            msg = call("find_comparables", {"keywords": words, "country": country})
+        if not any(t.name == "plan_searches" for t in tools):
+            msg = call("plan_searches", {"searches": [first, [item.split()[-1]]], "notes": "reject bundles"})
+        elif isinstance(last, HumanMessage) or last.name == "plan_searches":
+            msg = call("find_comparables", {"keywords": first if searches == 0 else [item.split()[-1]]})
         elif last.name == "find_comparables" and not self.stop_after_search:
             from fairprice.agent import tool_text  # MCP tools return content blocks, not plain text
             found = json.loads(tool_text(last))["results"]
             reject = {str(r["id"]): "bundle" for r in found if any(w in r["description"] for w in self.reject)}
-            msg = call("check_price_comparability", {"unit_price": price, "currency": "NGN" if country == "NG" else
-                                                     {"KE": "KES", "RW": "RWF"}.get(country, "NGN"), "year": 2025,
-                                                     "candidate_ids": [r["id"] for r in found if str(r["id"]) not in reject],
+            msg = call("check_price_comparability", {"candidate_ids": [r["id"] for r in found if str(r["id"]) not in reject],
                                                      "rejected": reject})
         else:
             msg = AIMessage("I searched, kept the comparable records and checked the price [L1].")
@@ -250,7 +248,8 @@ async def fake_session(model):
 
     from fairprice import agent, server
     SAVER = SAVER or InMemorySaver()
-    tools = [as_tool(f) for f in (server.find_comparables, server.check_price_comparability,
+    tools = [as_tool(f) for f in (server.start_review, server.start_package_review, server.plan_searches,
+                                  server.find_comparables, server.check_price_comparability, server.challenge_review,
                                   server.write_price_review, server.get_price_review)]
     yield agent.build_graph(tools, [StructuredTool.from_function(execute_query)], model, SAVER), {t.name: t for t in tools}
 

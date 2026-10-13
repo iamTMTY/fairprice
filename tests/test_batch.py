@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,7 +11,7 @@ import pytest
 from openpyxl import load_workbook
 
 from conftest import ScriptedModel, fake_session
-from fairprice import batch
+from fairprice import batch, db, server
 
 EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
 
@@ -99,10 +100,12 @@ def test_analyse_once_per_item_reuses_finished_lines_and_isolates_failures(capsy
              {"line": "4", "item": "Laptop computer", "quantity": 1, "prices": {"A": 2e6}}]
     base = {"currency": "NGN", "year": 2025, "country": "NG"}
 
+    run = db.start_run("package", "analyse", base, lines, ["A"])
+
     async def go():
         async with fake_session(ScriptedModel(keywords={"Toyota Hilux double cabin pickup": ["hilux"]})) as (graph, _):
-            first = await batch.analyse(graph, lines, base, "an1")
-            again = await batch.analyse(graph, lines, base, "an1", only=["4"])
+            first = await batch.analyse(graph, lines, base, run)
+            again = await batch.analyse(graph, lines, base, run, only=["4"])
 
             class Broken:
                 async def aget_state(self, config):
@@ -110,12 +113,14 @@ def test_analyse_once_per_item_reuses_finished_lines_and_isolates_failures(capsy
 
                 async def ainvoke(self, *a, **k):
                     raise RuntimeError("model went away")
-            failed = await batch.analyse(Broken(), lines[:1], base, "an2")
+            failed = await batch.analyse(Broken(), lines[:1], base, db.start_run("package", "x", base, lines, ["A"]))
             return first, again, failed
     first, again, failed = asyncio.run(go())
     assert first["1"] is first["2"] and "3" not in first and first["4"]["final"]["band"] is None
     assert "reusing the finished result" in capsys.readouterr().out and set(again) == {"4"}
     assert failed["1"]["error"].startswith("RuntimeError")
+    replayed = server.review(run)[2]  # the report is rebuilt from the run's recorded steps
+    assert replayed["1"]["final"] == first["1"]["final"] and replayed["2"] is replayed["1"] and "3" not in replayed
 
 
 def test_full_package_run_with_revise_and_approve(session, answers, capsys, monkeypatch):
@@ -127,7 +132,13 @@ def test_full_package_run_with_revise_and_approve(session, answers, capsys, monk
     assert '"saved"' in out and "bid-package" in out
     answers(["reject"])
     asyncio.run(batch.run(args))
-    assert "Not saved: the reviewer rejected the draft." in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "Not saved: the reviewer rejected the draft." in out
+    run = re.search(r"Review (\w+) \|", out).group(1)
+    answers(["reject"])
+    asyncio.run(batch.run(argparse.Namespace(**{**vars(args), "resume": run})))
+    out = capsys.readouterr().out
+    assert f"Review {run} |" in out and "reusing the finished result" in out
     bad = argparse.Namespace(**{**vars(args), "sheet": str(EXAMPLES / "missing.txt")})
     with pytest.raises(SystemExit, match="was not read"):
         asyncio.run(batch.run(bad))

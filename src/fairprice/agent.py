@@ -16,7 +16,6 @@ import subprocess
 import sys
 import time
 import urllib.request
-import uuid
 from pathlib import Path
 from typing import TypedDict
 
@@ -25,6 +24,7 @@ from langchain.agents import create_agent
 from langchain.chat_models import init_chat_model
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.tools import StructuredTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.errors import GraphRecursionError
@@ -33,9 +33,9 @@ from langgraph.types import Command, interrupt
 from sqlalchemy import select
 
 from fairprice import ingest, report
-from fairprice.db import AUDIT_LOG, REPORTS, approvals, decide, engine, grant
+from fairprice.db import AUDIT_LOG, REPORTS, add_step, approvals, decide, engine
 from fairprice.storage import storage
-from fairprice.server import MIN_COMPARABLES, record_id
+from fairprice.server import MIN_COMPARABLES, discard_review, record_id
 
 ROOT = Path(__file__).resolve().parents[2]
 DB = str(ROOT / os.environ.get("FAIRPRICE_DB", "data/fairprice.duckdb"))  # relative paths are relative to ROOT
@@ -68,17 +68,20 @@ Item under review: {item}
 Price under review: {unit_price} {currency} per unit, {year}. Country of the data to search: {country}.
 {feedback}
 Steps:
-1. Call find_comparables with 1-3 short keywords taken from the item (product type, brand, model or key spec).
-2. Read the results. Keep only records for the SAME kind of product at a comparable specification.
+1. Call plan_searches first. List the keyword sets you will try, most specific first, each built on the word
+   that names the product's model or kind (for example [["hilux"], ["hilux", "pickup"], ["pickup", "4x4"]]),
+   and say in notes what you will reject. A keyword matches its words in any order.
+2. Call find_comparables with the first set in your plan.
+3. Read the results. Keep only records for the SAME kind of product at a comparable specification.
    Reject a record, with a short reason, if it is a different product, a bundle of mixed items,
    or a lot price (quantity 1 but the description says several units, a project, or installation works).
    Most records do not state every specification. A record that does not mention a spec (engine size,
    memory, model year) is NOT a mismatch; reject only records that state a different spec.
-3. Call check_price_comparability with candidate_ids (every id you kept) and rejected ({{id: reason}}).
-4. If the assessment starts with insufficient_comparables, search again with broader or alternative
-   keywords (synonyms, drop model numbers, wider years). At most 4 searches in total. Then check again.
-5. Finish with 3-5 plain sentences: what you searched, what you rejected and why, and the assessment.
-   Cite records as [L<id>], for example [L112029]. Do not repeat prices or band figures; the report shows them."""
+4. Call check_price_comparability with candidate_ids (every id you kept) and rejected ({{id: reason}}).
+5. If a search found nothing, or the assessment starts with insufficient_comparables, run the next search in
+   your plan, then check again with every id you kept from ALL searches. At most 4 searches in total.
+6. Finish with 3-5 plain sentences: what you searched, what you rejected and why, and the assessment.
+   Do not repeat prices or band figures; the report shows them."""
 
 CHALLENGER = """You are an independent auditor. Your job is to try to DISPROVE the analyst's price finding.
 
@@ -168,43 +171,79 @@ async def audit_interceptor(request, handler):
     except Exception as e:
         audit(CURRENT_RUN, server=request.server_name, tool=request.name, args=request.args, error=repr(e))
         raise
-    audit(CURRENT_RUN, server=request.server_name, tool=request.name, args=request.args,
+    run_id = CURRENT_RUN
+    if request.name in ("start_review", "start_package_review"):  # the call that creates the run is logged under it
+        run_id = as_json(tool_text(result)).get("run_id") or run_id
+    audit(run_id, server=request.server_name, tool=request.name, args=request.args,
           output=tool_text(result), seconds=round(time.perf_counter() - start, 2))
     return result
+
+
+def planned(messages):
+    """The keyword sets of the Analyst's plan, from its plan_searches call."""
+    calls = [c for m in messages if isinstance(m, AIMessage) for c in m.tool_calls if c["name"] == "plan_searches"]
+    return [list(keys) for keys in (calls[-1]["args"].get("searches") or [])] if calls else []
+
+
+def next_planned(messages):
+    """The first planned keyword set not searched yet (keywords match their words in any order)."""
+    words = lambda keys: frozenset(w.lower() for k in keys for w in str(k).split())
+    tried = {words(c["args"].get("keywords") or []) for m in messages if isinstance(m, AIMessage)
+             for c in m.tool_calls if c["name"] == "find_comparables"}
+    return next((keys for keys in planned(messages) if words(keys) not in tried), None)
 
 
 def unfinished(messages):
     """Return an instruction if the Analyst stopped too early, else None."""
     tool_msgs = [m for m in messages if isinstance(m, ToolMessage)]
-    searches = sum(m.name == "find_comparables" for m in tool_msgs)
+    searches = [m for m in tool_msgs if m.name == "find_comparables"]
+    then = " Then call check_price_comparability with every id you kept from ALL searches."
+    if not any(m.name == "plan_searches" for m in tool_msgs):
+        return ("Start by recording your search plan with plan_searches: the keyword sets you will try, most "
+                "specific first, each built on the word that names the product's model or kind.")
+    nxt = next_planned(messages)
+    if searches and len(searches) < 4 and all(as_json(tool_text(m)).get("total_matches", 0) == 0 for m in searches):
+        return ("Every search so far found nothing. " + (f"Run the next search in your plan: {nxt}." if nxt else
+                "Search for the single word that names the product, such as 'hilux' or 'laptop'.") + then)
     if not tool_msgs or tool_msgs[-1].name != "check_price_comparability":
         return ("You searched after your last price check (or never checked). Call "
                 "check_price_comparability now with every id you kept from ALL searches.")
     last = as_json(tool_text(tool_msgs[-1]))
-    if (last.get("band") or {}).get("n", 0) < 10 and searches < 2 and not last.get("assessment", "").startswith("insufficient"):
-        return ("Your band rests on few records from a single search. Run one broader search with just the word "
-                "that names the product's model (such as 'hilux' or 'probook'), never the brand alone (such as "
-                "'toyota' or 'hp') and never a specification, to confirm it. Then call check_price_comparability "
-                "with every id you kept from ALL searches.")
-    if last.get("assessment", "").startswith("insufficient") and searches < 4:
-        return ("Too few comparables. Search again with fewer keywords: keep the one word that names the "
-                "product (the brand, model or kind of product, such as 'hilux', 'probook' or 'motorcycle'), "
-                "never a specification such as '125cc', '16GB' or '1.5HP', and drop generic words such as "
-                "'supply'. Reject anything that is not that product; a record that does not state the "
-                "specification is not a mismatch. Then call "
-                "check_price_comparability with every id you kept from ALL searches.")
+    if (last.get("band") or {}).get("n", 0) < 10 and len(searches) < 2 and not last.get("assessment", "").startswith("insufficient"):
+        return ("Your band rests on few records from a single search. " + (
+            f"Run the next search in your plan ({nxt}) to confirm it." if nxt else
+            "Run one broader search with just the word that names the product's model (such as 'hilux' or "
+            "'probook'), never the brand alone (such as 'toyota' or 'hp') and never a specification, to confirm it.") + then)
+    if last.get("assessment", "").startswith("insufficient") and len(searches) < 4:
+        return ("Too few comparables. " + (f"Run the next search in your plan: {nxt}." if nxt else
+                "Search again with fewer keywords: keep the one word that names the product (the brand, model or "
+                "kind of product, such as 'hilux', 'probook' or 'motorcycle'), never a specification such as '125cc', "
+                "'16GB' or '1.5HP', and drop generic words such as 'supply'.") + " Reject anything that is not that "
+                "product; a record that does not state the specification is not a mismatch." + then)
     return None
+
+
+def bound(tool, run_id, line):
+    """One of our MCP tools with run_id and line filled in by code, so the model never handles them."""
+    schema = tool.args_schema if isinstance(tool.args_schema, dict) else tool.args_schema.model_json_schema()
+    schema = {**schema, "properties": {k: v for k, v in schema.get("properties", {}).items() if k not in ("run_id", "line")},
+              "required": [r for r in schema.get("required", []) if r not in ("run_id", "line")]}
+
+    async def call(**kwargs):
+        return await tool.ainvoke({**kwargs, "run_id": run_id, "line": line})
+    return StructuredTool(name=tool.name, description=tool.description, args_schema=schema, coroutine=call)
 
 
 def build_graph(own_tools, borrowed_tools, model, checkpointer):
     by_name = {t.name: t for t in own_tools}
-    analyst_tools = [by_name["find_comparables"], by_name["check_price_comparability"]]
     challenger_tools = borrowed_tools  # independent read-only SQL, not the Analyst's tools
+    run_tool = lambda name, req: bound(by_name[name], req["run_id"], req["line"])
 
     async def analyst(state: State):
         req = state["request"]
         feedback = f"Reviewer feedback to address: {state['feedback']}\n" if state.get("feedback") else ""
-        agent = create_agent(model, analyst_tools, system_prompt=ANALYST.format(**req, feedback=feedback))
+        tools = [run_tool(n, req) for n in ("plan_searches", "find_comparables", "check_price_comparability")]
+        agent = create_agent(model, tools, system_prompt=ANALYST.format(**req, feedback=feedback))
         messages = [("user", "Prepare the price evidence.")]
         for _ in range(3):  # self-check after each attempt; send the Analyst back if work is unfinished
             try:
@@ -223,7 +262,7 @@ def build_graph(own_tools, borrowed_tools, model, checkpointer):
                 continue
             args, out = calls.get(m.tool_call_id, {}).get("args", {}), as_json(tool_text(m))
             if m.name == "find_comparables":
-                searches.append({"keywords": args.get("keywords"), "country": args.get("country"),
+                searches.append({"keywords": args.get("keywords"), "country": req["country"],
                                  "matches": out.get("total_matches")})
             elif m.name == "check_price_comparability" and "error" not in out:
                 checks += 1
@@ -234,9 +273,8 @@ def build_graph(own_tools, borrowed_tools, model, checkpointer):
                                  "band": None, "accepted": [], "excluded": []}, "searches": searches}
         # The model nominates records across several checks; one final check covers all of them.
         kept -= {int(k) for k in rejected}  # keys already normalised above
-        result = await by_name["check_price_comparability"].ainvoke(
-            {"unit_price": req["unit_price"], "currency": req["currency"], "year": req["year"],
-             "candidate_ids": sorted(kept) or [int(k) for k in rejected], "rejected": rejected})
+        result = await run_tool("check_price_comparability", req).ainvoke(
+            {"candidate_ids": sorted(kept) or [int(k) for k in rejected], "rejected": rejected})
         return {"analysis": as_json(tool_text(result)), "rejected": rejected, "searches": searches}
 
     async def challenger(state: State):
@@ -263,6 +301,9 @@ def build_graph(own_tools, borrowed_tools, model, checkpointer):
         challenge = {"verdict": verdict.group(1) if verdict else "DISPUTED",
                      "reason": verdict.group(2).strip() if verdict else "Challenger gave no clear verdict.",
                      "remove": remove}
+        await run_tool("challenge_review", req).ainvoke(
+            {"verdict": challenge["verdict"], "reason": challenge["reason"],
+             "objections": {str(k): v for k, v in remove.items()}})
         return {"challenge": challenge}
 
     async def recheck(state: State):
@@ -277,9 +318,7 @@ def build_graph(own_tools, borrowed_tools, model, checkpointer):
             return {"final": a, "challenge": challenge}
         ids = [r["id"] for r in a["accepted"]] + [e["id"] for e in a["excluded"]]
         rejected = {**state.get("rejected", {}), **{str(k): f"Challenger: {v}" for k, v in remove.items()}}
-        result = await by_name["check_price_comparability"].ainvoke(
-            {"unit_price": req["unit_price"], "currency": req["currency"], "year": req["year"],
-             "candidate_ids": ids, "rejected": rejected})
+        result = await run_tool("check_price_comparability", req).ainvoke({"candidate_ids": ids, "rejected": rejected})
         return {"final": as_json(tool_text(result))}
 
     async def draft(state: State):
@@ -294,7 +333,7 @@ def build_graph(own_tools, borrowed_tools, model, checkpointer):
 
     async def save(state: State):
         result = await by_name["write_price_review"].ainvoke(
-            {"report": report.draft_name(state["request"]["item"], CURRENT_RUN), "approval": state["decision"]["approval"]})
+            {"run_id": state["request"]["run_id"], "approval": state["decision"]["approval"]})
         return {"saved": tool_text(result)}
 
     g = StateGraph(State)
@@ -311,37 +350,41 @@ def build_graph(own_tools, borrowed_tools, model, checkpointer):
     return g.compile(checkpointer=checkpointer)
 
 
-def save_draft(run_id, name, data, text):
-    """Store the draft (a reports row and its files, in FAIRPRICE_REPORT_FORMAT) and print a short summary and where
-    to find it; open it only if FAIRPRICE_OPEN_DRAFT=1. It stays marked DRAFT until a named officer approves it."""
-    fmt = os.environ.get("FAIRPRICE_REPORT_FORMAT", "xlsx")
-    store, written = storage(), report.files(data, name, fmt)
-    for file, content in written.items():
-        store.save(file, content)
-    with engine().begin() as db:
-        db.execute(REPORTS.delete().where(REPORTS.c.name == name))
-        db.execute(REPORTS.insert().values(name=name, run_id=run_id, status="draft", format=fmt, files=list(written),
-                                           created_at=dt.datetime.now(dt.timezone.utc), data=data))
-    audit(run_id, event="draft_created", name=name, files=list(written))
-    where = [store.location(f) for f in written]
-    print(f"\n{text}\n\nDraft report ({name}):\n" + "\n".join(f"  {w}" for w in where) + "\n")
+def open_draft(where):
+    """Open the draft in Excel or Numbers, only if FAIRPRICE_OPEN_DRAFT=1."""
     if os.environ.get("FAIRPRICE_OPEN_DRAFT") != "1":
         return
     if sys.platform == "win32":
-        os.startfile(where[0])
+        os.startfile(where)
     else:  # a file path, or a download link when reports are kept in S3-compatible storage
-        subprocess.run(["open" if sys.platform == "darwin" else "xdg-open", where[0]], capture_output=True)
+        subprocess.run(["open" if sys.platform == "darwin" else "xdg-open", where], capture_output=True)
 
 
-def discard_draft(run_id, name):
-    """A rejected or revised draft is deleted (its files and its row), so only approved reports are kept."""
-    with engine().begin() as db:
-        row = db.execute(select(REPORTS.c.files).where(REPORTS.c.name == name, REPORTS.c.status == "draft")).first()
-        db.execute(REPORTS.delete().where(REPORTS.c.name == name, REPORTS.c.status == "draft"))
-    store = storage()
-    for file in (row.files if row else None) or []:
-        store.delete(file)
-    audit(run_id, event="draft_deleted", name=name)
+async def gate(run_id, tools, text, usage, ask_lines=None):
+    """The human approval gate, for single items and packages: write_price_review drafts the report from what the
+    run recorded, a person reads it and decides; approve carries their approval to write_price_review, and reject
+    or revise deletes the draft. Returns the decision."""
+    add_step(run_id, "*", "cost", usage.summary())  # the report states what the run cost
+    drafted = as_json(tool_text(await tools["write_price_review"].ainvoke({"run_id": run_id})))
+    print(f"\n{text}\n\n{usage.line()}\n")
+    if "error" in drafted:
+        print(f"No draft: {drafted['error']}\n")
+    else:
+        print(f"Draft report ({drafted['draft']}):\n" + "\n".join(f"  {w}" for w in drafted["files"]) + "\n")
+        open_draft(drafted["files"][0])
+    decision = ask_decision(can_approve="error" not in drafted)
+    if decision["action"] == "revise" and ask_lines:
+        decision["lines"] = ask_lines()
+    request = drafted.get("request")
+    if decision["action"] == "approve":  # the person at this menu is the approval write_price_review needs
+        decide(request, True, decision["name"])
+        decision["approval"] = request
+    else:
+        if request:
+            decide(request, False)
+        discard_review(run_id)
+    audit(run_id, event="human_decision", **decision)
+    return decision
 
 
 def choose(prompt, options):
@@ -400,34 +443,37 @@ def approve_request(request_id):
     if request_id not in pending:
         raise SystemExit(f"No pending request {request_id}. Run `fairprice --approve` to list them.")
     row = pending[request_id]
+    target = row.target.split("@")[0]  # a review request is for one version of the review: <run id>@<step>
     if row.action == "write_price_review":
         with engine().connect() as db:
-            draft = db.execute(select(REPORTS).where(REPORTS.c.name == row.target)).first()
+            draft = db.execute(select(REPORTS).where(REPORTS.c.run_id == target, REPORTS.c.status == "draft")).first()
         if draft is None:
-            raise SystemExit(f"The draft {row.target} no longer exists.")
+            raise SystemExit(f"The draft for review {target} no longer exists.")
         r = draft.data["report"]
-        print(f"An AI app asks to approve the price review {row.target}: {r['title']}, {len(draft.data['prices'])} "
+        print(f"An AI app asks to approve the price review {target}: {r['title']}, {len(draft.data['prices'])} "
               f"prices, {len(draft.data['sources'])} sources. Files: " + ", ".join(storage().location(f) for f in draft.files))
     else:
-        print(f"An AI app asks to add country {row.target}: download its procurement data and rebuild the database.")
+        print(f"An AI app asks to add country {target}: download its procurement data and rebuild the database.")
     action = choose("Decision", [("approve", "carry it out now, under your name"), ("reject", "refuse it")])
     name = ""
     while action == "approve" and not name:
         name = input("Your full name: ").strip()
     decide(request_id, action == "approve", name or None)
-    audit(request_id, event="human_decision", action=action, name=name or None, request=row.action, target=row.target)
+    audit(target, event="human_decision", action=action, name=name or None, request=row.action, target=row.target)
     if action == "approve":
         tool = server.write_price_review if row.action == "write_price_review" else server.add_country
-        print(json.dumps(tool(row.target, approval=request_id), indent=2))
+        print(json.dumps(tool(target, approval=request_id), indent=2))
     else:
+        if row.action == "write_price_review":
+            server.discard_review(target)
         print("Rejected; nothing was changed.")
 
 
-def ask_decision():
+def ask_decision(can_approve=True):
     """The human gate: approve (with a name), revise (with questions) or reject."""
-    action = choose("Decision", [("approve", "stamp the report with your name and keep it"),
-                                 ("revise", "send it back with questions; the draft is deleted"),
-                                 ("reject", "delete the draft; nothing is kept")])
+    options = [("approve", "stamp the report with your name and keep it")] if can_approve else []
+    action = choose("Decision", options + [("revise", "send it back with questions; the draft is deleted"),
+                                           ("reject", "delete the draft; nothing is kept")])
     decision = {"action": action}
     while action == "approve" and not decision.get("name"):
         decision["name"] = input("Approving officer's full name: ").strip()
@@ -629,18 +675,24 @@ async def session(model_name=MODEL):
 
 async def run(args):
     global CURRENT_RUN
-    run_id = CURRENT_RUN = args.resume or uuid.uuid4().hex[:12]
     usage = Usage()
-    config = {"configurable": {"thread_id": run_id}, "callbacks": [usage]}
-    async with session() as (graph, _):
+    async with session() as (graph, tools):
         if args.resume:
-            payload = None
+            run_id, payload = args.resume, None
         else:
-            req = {"item": args.item, "unit_price": args.unit_price, "currency": args.currency,
-                   "year": args.year, "country": args.country}
+            started = as_json(tool_text(await tools["start_review"].ainvoke(
+                {"item": args.item, "unit_price": args.unit_price, "currency": args.currency, "year": args.year,
+                 "country": args.country})))
+            if "error" in started:
+                raise SystemExit(started["error"])
+            run_id = started["run_id"]
+            req = {"run_id": run_id, "line": "1", "item": args.item, "unit_price": args.unit_price,
+                   "currency": started["currency"], "year": started["year"], "country": started["country"]}
             payload = {"request": req}
             audit(run_id, event="run_started", request=req, model=MODEL)
             print(f"Run {run_id} | model {MODEL}")
+        CURRENT_RUN = run_id
+        config = {"configurable": {"thread_id": run_id}, "callbacks": [usage]}
         while True:
             async for update in graph.astream(payload, config, stream_mode="updates"):
                 for node in update:
@@ -649,18 +701,7 @@ async def run(args):
             snapshot = await graph.aget_state(config)
             if not snapshot.next:
                 break
-            req = snapshot.values["request"]
-            draft = report.draft_name(req["item"], run_id)
-            data = report.build(req["item"], *report.single(snapshot.values), None, req, run_id, MODEL)
-            data["report"]["cost"] = usage.summary()
-            save_draft(run_id, draft, data, snapshot.values["report"] + "\n\n" + usage.line())
-            decision = ask_decision()
-            if decision["action"] == "approve":  # the person at this menu is the approval write_price_review needs
-                decision["approval"] = grant("write_price_review", draft, decision["name"])
-            audit(run_id, event="human_decision", **decision)
-            if decision["action"] != "approve":
-                discard_draft(run_id, draft)
-            payload = Command(resume=decision)
+            payload = Command(resume=await gate(run_id, tools, snapshot.values["report"], usage))
         final = (await graph.aget_state(config)).values
         print(final.get("saved") or "Not saved: the reviewer rejected the draft.")
         audit(run_id, event="run_finished", saved=final.get("saved"), cost=usage.summary())

@@ -190,17 +190,20 @@ def build(title, lines, states, bidders, checks, base, run_id, model=""):
              "adjusted_price": round(adjusted[i], 2) if i in adjusted else None,
              "published_by": info[i]["publisher"], "ocid": info[i]["ocid"], "contract_id": info[i]["line_id"],
              "dataset": info[i]["source"], "record_id": i} for i, n in refs.items()]
+    how = [{"line": e["line"], "item": e["item"],
+            "plan": (states.get(e["line"]) or {}).get("plan"),
+            "searches": (states.get(e["line"]) or {}).get("searches", []),
+            "assessment": ((states.get(e["line"]) or {}).get("final") or {}).get("assessment"),
+            "second_check": {k: v for k, v in ((states.get(e["line"]) or {}).get("challenge") or {}).items()
+                             if k in ("verdict", "reason", "applied")} or None,
+            "objections": {str(k): v for k, v in (((states.get(e["line"]) or {}).get("challenge") or {}).get("remove") or {}).items()}}
+           for e in lines]
     return {"report": {"title": title, "status": "draft", "approved_by": None, "approved_at": None,
                        "prepared_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
                        "prepared_by": f"FairPrice ({model})" if model else "FairPrice", "run_id": run_id,
                        "currency": cur, "prices_in_year": year, "country": base["country"],
                        "bid_file_checks": [check_text(k, cur) for k in checks] if checks is not None else None},
-            "prices": prices, "sources": srcs}
-
-
-def cited(data):
-    """The record ids a report relies on, read from the report itself."""
-    return [s["record_id"] for s in data["sources"]]
+            "prices": prices, "sources": srcs, "lines": how}
 
 
 def status_line(data):

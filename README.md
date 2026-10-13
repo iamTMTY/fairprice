@@ -251,20 +251,30 @@ With S3 storage, the draft and approved reports are shown as download links that
 uv run --directory /path/to/FairPrice python -m fairprice.server
 ```
 
-This gives the other app the tools (`find_comparables`, `check_price_comparability`, `write_price_review`, `get_price_review`, `list_countries`, `add_country`), but not the Challenger or the self-check, which are in the agent.
+A review is one **run** that links all the tool calls. The other app does what FairPrice's own agent does:
+
+1. `start_review(item, unit_price, currency, year, country)` → a `run_id` (or `start_package_review(package, …)` for a whole bid package);
+2. `plan_searches(run_id, searches)`: the keyword sets it will try, most specific first;
+3. `find_comparables(run_id, keywords)`: past awards in the run's country; every word must match, in any order;
+4. `check_price_comparability(run_id, candidate_ids, rejected)`: the band and the verdict. Only records the run's own searches found are accepted; the price, currency and year come from the run;
+5. `challenge_review(run_id, verdict, reason, objections)`: an optional second check, shown in the report;
+6. `write_price_review(run_id)`: a draft report, built only from what the run recorded, and a request for a person to approve it;
+7. after a person approves, `write_price_review(run_id, approval)` writes the final report, and `get_price_review(run_id)` returns it as JSON.
+
+Packages use the same tools with `line="<BoQ line>"`. The app never sends a report, a price or a source list to be saved, so it cannot put anything in a report that its run did not find. FairPrice's Challenger agent and self-check are not part of the server; another app brings its own reasoning, and the tools keep the evidence honest. `list_countries` and `add_country` manage the data.
 
 **An AI app can never approve a report or add a country by itself.** When it calls `write_price_review` or `add_country`, the tool only records a request and replies with a command for a person to run:
 
 ```
 $ uv run fairprice --approve              # list the requests waiting
 $ uv run fairprice --approve 3f9a1c2b7d10e4a5
-An AI app asks to approve the price review DRAFT-laptop-computer-…: laptop computer, 1 prices, 12 sources.
+An AI app asks to approve the price review 36daf9b9af36: laptop computer, 1 prices, 12 sources.
 Decision (↑/↓ and Enter, or press a number)
 ❯ 1. approve  carry it out now, under your name
   2. reject   refuse it
 ```
 
-The person sees what they are approving, chooses, and gives their name; the report is approved under that name, never a name the app supplied. Each approval works once, for that one report or country, and is recorded in the `approvals` table and the audit log. Inside FairPrice's own runs, the approval menu at the end of a run is that person.
+The person sees what they are approving, chooses, and gives their name; the report is approved under that name, never a name the app supplied. Each approval works once, for that version of that review (if the review changes after the draft, the app must draft again) or that country, and is recorded in the `approvals` table and the audit log. Inside FairPrice's own runs, the approval menu at the end of a run is that person.
 
 ## If something goes wrong
 
@@ -303,7 +313,7 @@ Created when you run it (not in the repo): `data/` (downloads, database, run sta
 uv run pytest --cov
 ```
 
-72 tests, 99% line and branch coverage, about 40 seconds, and no model or network needed. They run against a small synthetic dataset built through the real ingest (registry, downloads and World Bank mocked): a Nigeria-style publication with item quantities and the traps the agent must handle (a bundle, a placeholder date, a test record, a duplicate, a multi-item contract), a Kenya-style one with award totals only, and a Rwanda-style one with prices per item. A scripted model stands in for Gemma, so the agent graph, the approval gate, the CLI, the bid packages and the eval runner all run for real; one integration test starts both MCP servers as subprocesses over stdio. The tests never touch `data/`, `reports/` or your database.
+86 tests, 99% line and branch coverage, about 30 seconds, and no model or network needed. They run against a small synthetic dataset built through the real ingest (registry, downloads and World Bank mocked): a Nigeria-style publication with item quantities and the traps the agent must handle (a bundle, a placeholder date, a test record, a duplicate, a multi-item contract), a Kenya-style one with award totals only, and a Rwanda-style one with prices per item. A scripted model stands in for Gemma, so the agent graph, the approval gate, the CLI, the bid packages and the eval runner all run for real; one integration test starts both MCP servers as subprocesses over stdio. The tests never touch `data/`, `reports/` or your database.
 
 The tests prove the code does what it should. They do not measure how good the model's judgement is; that is what the evals are for (EVALS.md).
 

@@ -1,4 +1,4 @@
-"""The SQL database: the audit log, the reports and human approvals. Any SQLAlchemy URL works (FAIRPRICE_SQL_URL), e.g.
+"""The SQL database: runs and their steps, the audit log, the reports and human approvals. Any SQLAlchemy URL works (FAIRPRICE_SQL_URL), e.g.
 postgresql+psycopg://user@host/db with that database's driver installed. Default: data/runs.sqlite.
 """
 
@@ -39,6 +39,23 @@ APPROVALS = Table("approvals", META,
                   Column("approved_by", String(200)),
                   Column("created_at", DateTime(timezone=True), nullable=False),
                   Column("decided_at", DateTime(timezone=True)))
+
+RUNS = Table("runs", META,
+             Column("id", String(32), primary_key=True),
+             Column("kind", String(16), nullable=False),  # item (one price) or package (a BoQ and its bids)
+             Column("title", String(300), nullable=False),
+             Column("request", JSON, nullable=False),  # currency, year, country
+             Column("lines", JSON, nullable=False),  # [{line, item, quantity, prices: {bidder: unit price}}]
+             Column("bidders", JSON, nullable=False),
+             Column("checks", JSON),  # problems found in the bid files (packages only)
+             Column("created_at", DateTime(timezone=True), nullable=False))
+RUN_STEPS = Table("run_steps", META,
+                  Column("id", Integer, primary_key=True, autoincrement=True),
+                  Column("run_id", String(32), index=True, nullable=False),
+                  Column("line", String(64), nullable=False),
+                  Column("kind", String(16), nullable=False),  # plan, search, check, challenge, cost
+                  Column("data", JSON, nullable=False),  # what was asked and what our code found
+                  Column("created_at", DateTime(timezone=True), nullable=False))
 
 
 def url():
@@ -109,3 +126,42 @@ def use_approval(approval_id, action, target):
 def approvals(status="pending"):
     with engine().connect() as db:
         return db.execute(select(APPROVALS).where(APPROVALS.c.status == status).order_by(APPROVALS.c.created_at)).all()
+
+
+# Runs: one review across many MCP calls. Every step's real data comes from our code and is stored here,
+# so a report is built only from what this run recorded.
+
+def start_run(kind, title, request, lines, bidders, checks=None):
+    new = secrets.token_hex(6)
+    with engine().begin() as db:
+        db.execute(RUNS.insert().values(id=new, kind=kind, title=title, request=request, lines=lines, bidders=bidders,
+                                        checks=checks, created_at=now()))
+    return new
+
+
+def get_run(run_id):
+    with engine().connect() as db:
+        return db.execute(select(RUNS).where(RUNS.c.id == run_id)).first()
+
+
+def add_step(run_id, line, kind, data):
+    with engine().begin() as db:
+        return db.execute(RUN_STEPS.insert().values(run_id=run_id, line=line, kind=kind, data=data,
+                                                    created_at=now())).inserted_primary_key[0]
+
+
+def steps(run_id, line=None, kind=None):
+    query = select(RUN_STEPS).where(RUN_STEPS.c.run_id == run_id)
+    if line is not None:
+        query = query.where(RUN_STEPS.c.line == line)
+    if kind is not None:
+        query = query.where(RUN_STEPS.c.kind == kind)
+    with engine().connect() as db:
+        return db.execute(query.order_by(RUN_STEPS.c.id)).all()
+
+
+def supersede(action, prefix):
+    """Cancel pending requests for an older version of the same run (their draft no longer exists)."""
+    with engine().begin() as db:
+        db.execute(APPROVALS.update().where(APPROVALS.c.action == action, APPROVALS.c.target.like(f"{prefix}%"),
+                                            APPROVALS.c.status == "pending").values(status="superseded", decided_at=now()))

@@ -52,8 +52,10 @@ def test_a_crashing_case_is_a_failed_run_not_a_crash():
     class Broken:
         async def ainvoke(self, *a, **k):
             raise RuntimeError("model went away")
-    result = asyncio.run(evals.run_case(Broken(), {"id": "x", "item": "y", "unit_price": 1, "year": 2025,
-                                                    "expect": [], "traps": []}, "m"))
+    tools = {"start_review": SimpleNamespace(ainvoke=lambda args: asyncio.sleep(0, '{"run_id": "r1", "currency": "NGN", '
+                                                                             '"year": 2025, "country": "NG"}'))}
+    result = asyncio.run(evals.run_case(Broken(), tools, {"id": "x", "item": "y", "unit_price": 1, "year": 2025,
+                                                           "expect": [], "traps": []}, "m"))
     assert result["assessment"] == "error" and not result["passed"]
 
 
@@ -75,7 +77,7 @@ def test_filter_cases(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(evals, "deterministic_checks", lambda: [])
     seen = []
 
-    async def run_case(graph, case, model):
+    async def run_case(graph, tools, case, model):
         seen.append(case["id"])
         return {"case": case["id"], "run_id": "r", "seconds": 0.1, "assessment": "x", "n": 0, "median": None,
                 "challenge": None, "failures": [], "passed": True}

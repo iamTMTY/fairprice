@@ -8,12 +8,12 @@ from types import SimpleNamespace
 from unittest import mock
 
 import pytest
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.types import Command
 
 import conftest
 from conftest import ScriptedModel, fake_session, ids
-from fairprice import agent, report
+from fairprice import agent, report, server
 
 REQ = {"item": "Toyota Hilux double cabin pickup", "unit_price": 95e6, "currency": "NGN", "year": 2025, "country": "NG"}
 
@@ -22,15 +22,44 @@ def tool_msg(name, content):
     return ToolMessage(content=json.dumps(content), name=name, tool_call_id=uuid.uuid4().hex)
 
 
+def plan(*searches):
+    """The Analyst's plan_searches call and its answer."""
+    call = AIMessage("", tool_calls=[{"name": "plan_searches", "args": {"searches": list(searches)}, "id": uuid.uuid4().hex}])
+    return [call, tool_msg("plan_searches", {"recorded": True})]
+
+
+def searched(keywords, matches):
+    call = AIMessage("", tool_calls=[{"name": "find_comparables", "args": {"keywords": keywords}, "id": uuid.uuid4().hex}])
+    return [call, tool_msg("find_comparables", {"total_matches": matches})]
+
+
 def test_self_check_sends_the_analyst_back_when_unfinished():
-    assert "never checked" in agent.unfinished([])
-    assert "searched after your last price check" in agent.unfinished([tool_msg("find_comparables", {})])
-    thin = [tool_msg("find_comparables", {}), tool_msg("check_price_comparability", {"band": {"n": 6}, "assessment": "within_band"})]
-    assert "one broader search" in agent.unfinished(thin)
-    few = [tool_msg("find_comparables", {}), tool_msg("check_price_comparability", {"band": None, "assessment": "insufficient_comparables"})]
-    assert "never a specification" in agent.unfinished(few)
-    done = [tool_msg("find_comparables", {})] * 2 + [tool_msg("check_price_comparability", {"band": {"n": 12}, "assessment": "within_band"})]
-    assert agent.unfinished(done) is None
+    assert "plan_searches" in agent.unfinished([])  # planning comes first
+    assert "never checked" in agent.unfinished(plan(["hilux"]))
+    assert "searched after your last price check" in agent.unfinished(plan(["hilux"]) + searched(["hilux"], 3))
+    thin = searched(["hilux"], 6) + [tool_msg("check_price_comparability", {"band": {"n": 6}, "assessment": "within_band"})]
+    assert "one broader search" in agent.unfinished(plan(["hilux"]) + thin)
+    assert "next search in your plan (['pickup'])" in agent.unfinished(plan(["hilux"], ["pickup"]) + thin)
+    few = searched(["hilux"], 2) + [tool_msg("check_price_comparability", {"band": None, "assessment": "insufficient_comparables"})]
+    assert "never a specification" in agent.unfinished(plan(["hilux"]) + few)
+    assert "Run the next search in your plan: ['pickup']" in agent.unfinished(plan(["hilux"], ["pickup"]) + few)
+    nothing = plan(["hilux double cabin"], ["cabin", "double hilux"], ["pickup"]) + searched(["double cabin hilux"], 0)
+    assert "Every search so far found nothing. Run the next search in your plan: ['pickup']" in agent.unfinished(nothing)
+    assert "single word" in agent.unfinished(plan(["hilux"]) + searched(["hilux"], 0))
+    done = searched(["hilux"], 12) * 2 + [tool_msg("check_price_comparability", {"band": {"n": 12}, "assessment": "within_band"})]
+    assert agent.unfinished(plan(["hilux"]) + done) is None
+    assert agent.planned([]) == [] and agent.next_planned(plan(["a b"]) + searched(["b", "a"], 1)) is None
+
+
+def test_bound_tools_hide_the_run_from_the_model():
+    async def go():
+        async with fake_session(ScriptedModel()) as (_, tools):
+            run = server.start_review("Laptop computer", 2e6, year=2025)["run_id"]
+            search = agent.bound(tools["find_comparables"], run, "1")
+            assert "run_id" not in search.args and "line" not in search.args and "keywords" in search.args
+            return json.loads(await search.ainvoke({"keywords": ["laptop"]})), run
+    found, run = asyncio.run(go())
+    assert found["total_matches"] >= 2 and server.review(run)[0].id == run
 
 
 def test_tool_output_helpers():
@@ -39,9 +68,17 @@ def test_tool_output_helpers():
     assert agent.as_json("not json") == {"error": "not json"}
 
 
-async def run_graph(model, request=REQ, thread=None):
+def started(request=REQ):
+    """A review started the way the CLI starts one: the request carries its run_id and line."""
+    run = server.start_review(request["item"], request["unit_price"], request["currency"], request["year"],
+                              request["country"])["run_id"]
+    return {**request, "run_id": run, "line": "1"}
+
+
+async def run_graph(model, request=REQ):
+    request = started(request)
     async with fake_session(model) as (graph, tools):
-        config = {"configurable": {"thread_id": thread or uuid.uuid4().hex}}
+        config = {"configurable": {"thread_id": request["run_id"]}}
         await graph.ainvoke({"request": request}, config)
         return graph, config, (await graph.aget_state(config)).values
 
@@ -52,7 +89,10 @@ def test_graph_runs_to_the_approval_gate_and_stops(model):
     assert state["challenge"]["verdict"] == "DISPUTED" and "Price under review" in state["report"]
     bundle = ids("SELECT id FROM lines WHERE description LIKE '%Prado%'")[0]
     assert str(bundle) in state["rejected"]  # the Analyst's rejection is kept through the merge
-    assert len(state["searches"]) == 2  # the self-check asked for a broader search
+    assert len(state["searches"]) == 2  # the self-check asked for the next planned search
+    recorded = server.review(state["request"]["run_id"])[2]["1"]
+    assert recorded["final"] == state["final"] and recorded["plan"]["searches"] == [["hilux"], ["pickup"]]
+    assert recorded["challenge"]["verdict"] == "DISPUTED"  # the Challenger's verdict is a recorded step too
 
 
 def test_challenger_removals_are_applied_or_shown_as_objections():
@@ -105,10 +145,9 @@ def test_cli_run_reject_revise_and_approve(session, answers, capsys):
 
 
 def test_cli_resume_a_paused_run(session, answers, capsys):
-    thread = uuid.uuid4().hex[:12]
-    asyncio.run(run_graph(session, thread=thread))  # paused at the gate, in the shared checkpointer
+    _, config, _ = asyncio.run(run_graph(session))  # paused at the gate, in the shared checkpointer
     answers(["reject"])
-    asyncio.run(agent.run(argparse.Namespace(resume=thread, **REQ)))
+    asyncio.run(agent.run(argparse.Namespace(resume=config["configurable"]["thread_id"], **REQ)))
     assert "Not saved" in capsys.readouterr().out
 
 
@@ -214,24 +253,24 @@ def test_show_draft_summary_for_a_single_item():
 
 def test_a_person_decides_requests_from_ai_apps(answers, capsys, monkeypatch):
     """`fairprice --approve`: list requests, approve a report as a named person, reject an add_country request."""
-    from fairprice import db, server
+    from fairprice import db
     state = asyncio.run(run_graph(ScriptedModel(keywords={REQ["item"]: ["hilux"]})))[2]
-    agent.save_draft("ap", "DRAFT-from-an-app-ap", report.build("x", *report.single(state), None, REQ, "ap"), "")
-    request = server.write_price_review("DRAFT-from-an-app-ap")["request"]
+    run = state["request"]["run_id"]
+    request = server.write_price_review(run)["request"]
     agent.approve_request("")
     assert request in capsys.readouterr().out
     answers(["approve", "Ada Obi"])
     agent.approve_request(request)
     out = capsys.readouterr().out
-    assert "asks to approve the price review DRAFT-from-an-app-ap" in out and '"approved_by": "Ada Obi"' in out
-    assert server.get_price_review(json.loads(out[out.index("{"):])["saved"])["report"]["approved_by"] == "Ada Obi"
+    assert f"asks to approve the price review {run}" in out and '"approved_by": "Ada Obi"' in out
+    assert server.get_price_review(json.loads(out[out.index("{"):])["run_id"])["report"]["approved_by"] == "Ada Obi"
     country = db.request_approval("add_country", "RW")
     answers(["reject"])
     agent.approve_request(country)
     assert "Rejected; nothing was changed." in capsys.readouterr().out
     with pytest.raises(SystemExit, match="No pending request"):
         agent.approve_request(country)
-    gone = db.request_approval("write_price_review", "DRAFT-deleted")
+    gone = db.request_approval("write_price_review", "deleted@1")
     with pytest.raises(SystemExit, match="no longer exists"):
         agent.approve_request(gone)
     country = db.request_approval("add_country", "RW")

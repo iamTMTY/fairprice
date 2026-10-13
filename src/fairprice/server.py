@@ -17,7 +17,8 @@ import duckdb
 from mcp.server.fastmcp import FastMCP
 from sqlalchemy import select
 
-from fairprice.db import REPORTS, engine, request_approval, use_approval
+from fairprice.db import (REPORTS, add_step, engine, get_run, request_approval, start_run, steps, supersede,
+                          use_approval)
 from fairprice.storage import storage
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -75,21 +76,13 @@ def assess(unit_price, median):
                              else "within_band")
 
 
-@mcp.tool()
-def find_comparables(keywords: list[str], country: str | None = None, year_from: int | None = None,
-                     year_to: int | None = None, limit: int = 25) -> dict:
-    """Search published contract awards whose description contains ALL keywords (case-insensitive).
-
-    Use short, specific keywords (e.g. ["probook", "laptop"]). If too few results come back,
-    retry with fewer or alternative keywords. Each result carries data-quality flags.
-    limit: how many records to return, at most 50; total_matches always gives the full count.
-    country: ISO code of a loaded country, e.g. "NG". Some countries publish award totals only, with no
-    quantities, so their records have no unit price.
-    """
-    if not keywords:
+def search(keywords, country=None, year_from=None, year_to=None, limit=25):
+    """Records whose description or title contains every word of every keyword, in any order (case-insensitive)."""
+    words = [w for k in keywords for w in str(k).split()]
+    if not words:
         return {"error": "Give at least one keyword."}
-    where = ["(description || ' ' || coalesce(title, '')) ILIKE ?" for _ in keywords]
-    params = [f"%{k}%" for k in keywords]
+    where = ["(description || ' ' || coalesce(title, '')) ILIKE ?" for _ in words]
+    params = [f"%{w}%" for w in words]
     for clause, value in (("country = ?", country), ("year >= ?", year_from), ("year <= ?", year_to)):
         if value is not None:
             where.append(clause)
@@ -99,7 +92,7 @@ def find_comparables(keywords: list[str], country: str | None = None, year_from:
     found = rows(
         f"SELECT id, country, year, quantity, unit_price, amount, currency, n_items, line_type, description, buyer {sql} "
         f"ORDER BY year DESC NULLS LAST LIMIT ?",
-        [*params, min(limit, 50)],
+        [*params, max(1, min(limit, 50))],
     )
     for r in found:
         r["flags"] = data_flags(r)
@@ -107,20 +100,13 @@ def find_comparables(keywords: list[str], country: str | None = None, year_from:
         r["buyer"] = r["buyer"][:60] if r["buyer"] else None
         for k in ("unit_price", "amount"):
             r[k] = round(r[k], 2) if r[k] is not None else None
-        del r["n_items"], r["line_type"]  # used for the flags only; keep the output the model sees unchanged
+        del r["n_items"], r["line_type"]  # used for the flags only
     return {"total_matches": total, "returned": len(found), "results": found}
 
 
-@mcp.tool()
-def check_price_comparability(unit_price: float, currency: str, year: int, candidate_ids: list[int],
-                              rejected: dict[str, str] | None = None) -> dict:
-    """Build a price band for the price under review from candidate records.
-
-    candidate_ids: record ids from find_comparables that you believe describe the same product.
-    rejected: {id: reason} for candidates YOU judge not comparable (different model, spec, pack size).
-    The tool also rejects records with invalid dates, no unit price, multi-item contracts and
-    duplicates, then adjusts every price to `year` and `currency` using World Bank CPI and FX.
-    """
+def price_band(unit_price, currency, year, candidate_ids, rejected=None):
+    """The band for a price from records judged comparable: excludes flagged records and duplicates, adjusts every
+    price to `year` and `currency` (World Bank CPI and FX), and judges the price against the median."""
     rejected = {record_id(k): v for k, v in (rejected or {}).items()}
     if not candidate_ids:
         return {"error": "No candidate_ids given."}
@@ -174,65 +160,291 @@ def check_price_comparability(unit_price: float, currency: str, year: int, candi
     return result
 
 
-@mcp.tool()
-def write_price_review(report: str, approval: str = "") -> dict:
-    """Approve a draft price review and write its final files. A person must approve it first.
+# ---------------------------------------------------------------- runs: one review across many calls
 
-    report: the draft's name (DRAFT-...), as shown when the draft was made.
-    approval: the id of a person's approval for this report. Without one, this records a request and replies with
-    the command a person runs in the terminal to approve it (`fairprice --approve <id>`); the approver's name comes
-    from that person, not from this call. The review is refused if it cites no records or records that do not exist.
+def run_or_error(run_id, line):
+    run = get_run(run_id)
+    if run is None:
+        return None, None, {"error": f"No review {run_id!r}. Start one with start_review or start_package_review."}
+    entry = next((e for e in run.lines if e["line"] == str(line)), None)
+    if entry is None:
+        return run, None, {"error": f"Review {run_id} has no line {line!r}; its lines are {[e['line'] for e in run.lines]}."}
+    return run, entry, None
+
+
+def quoted(entry):
+    """The price under review for a line: the single price, or the median of the bidders' quotes."""
+    prices = list((entry.get("prices") or {}).values())
+    return statistics.median(prices) if prices else None
+
+
+@mcp.tool()
+def start_review(item: str, unit_price: float, currency: str = "NGN", year: int | None = None,
+                 country: str = "NG") -> dict:
+    """Start a price review of one item: what is being bought and the price quoted for it. Returns its run_id;
+    every other step of the review uses it, and is recorded under it, so the report is built only from what
+    this review's own searches and checks found.
+
+    year: when the price was quoted (default this year); past prices are adjusted for inflation to it.
+    country: ISO code of a loaded country whose past awards to compare with (see list_countries).
+    """
+    if not item.strip() or unit_price <= 0:
+        return {"error": "Give the item and a quoted unit price above zero."}
+    year = year or dt.date.today().year
+    request = {"currency": currency.upper(), "year": year, "country": country.upper()}
+    lines = [{"line": "1", "item": item.strip(), "quantity": None, "prices": {"Price under review": unit_price}}]
+    run_id = start_run("item", item.strip(), request, lines, ["Price under review"])
+    return {"run_id": run_id, "lines": lines, **request,
+            "next": "plan_searches, then find_comparables, then check_price_comparability, then write_price_review"}
+
+
+@mcp.tool()
+def start_package_review(package: dict, title: str = "bid package", currency: str = "NGN", year: int | None = None,
+                         country: str = "NG") -> dict:
+    """Start a review of a whole bid package: a bill of quantities and every bidder's price schedule, in the bid
+    package format (bid_package.schema.json: {"boq": [{line, item, quantity}], "bids": [{bidder, lines: [{line,
+    unit_price, quantity, total}]}]}). A package that does not match is refused with every problem. Returns the
+    run_id, its lines and the problems found in the bid files. Review each line with line="<its number>".
+    Bidders are never totalled or ranked.
+    """
+    from fairprice import batch
+    try:
+        package = batch.validate(json.loads(json.dumps(package)))
+    except batch.PackageError as e:
+        return {"error": "The package does not match the bid package format.", "problems": e.problems}
+    boq, bidders = batch.unpack(package)
+    checks = batch.file_checks(boq, bidders)
+    lines = batch.package_lines(boq, bidders)
+    request = {"currency": currency.upper(), "year": year or dt.date.today().year, "country": country.upper()}
+    run_id = start_run("package", title, request, lines, list(bidders), checks)
+    return {"run_id": run_id, "lines": lines, "bidders": list(bidders), **request,
+            "bid_file_problems": len(checks)}
+
+
+@mcp.tool()
+def plan_searches(run_id: str, searches: list[list[str]], notes: str = "", line: str = "1") -> dict:
+    """Record your search plan for a line before searching: the keyword sets you will try, most specific first
+    (e.g. [["hilux"], ["hilux", "pickup"], ["pickup"]]), and in notes what you will reject (bundles, other
+    models, lot prices). The plan is shown in the report; if a search comes back thin, try the next planned one.
+    """
+    run, entry, error = run_or_error(run_id, line)
+    if error:
+        return error
+    plan = [[str(w) for w in keys] for keys in searches if keys]
+    if not plan:
+        return {"error": "Give at least one keyword set, e.g. [[\"hilux\"]]."}
+    add_step(run_id, str(line), "plan", {"searches": plan, "notes": notes})
+    return {"recorded": True, "line": str(line), "item": entry["item"], "plan": plan}
+
+
+@mcp.tool()
+def find_comparables(run_id: str, keywords: list[str], line: str = "1", year_from: int | None = None,
+                     year_to: int | None = None, limit: int = 25) -> dict:
+    """Search published contract awards, in the review's country, for records whose description contains every
+    word of the keywords, in any order (case-insensitive): ["hilux pickup"] and ["hilux", "pickup"] are the same.
+
+    Use the word that names the product's model (e.g. ["hilux"] or ["probook"]); add words to narrow, remove
+    them to broaden. Each result carries data-quality flags. limit: at most 50; total_matches gives the full
+    count. The results are recorded under the review: only records found here can be used in its price check.
+    """
+    run, entry, error = run_or_error(run_id, line)
+    if error:
+        return error
+    found = search(keywords, run.request["country"], year_from, year_to, limit)
+    if "error" not in found:
+        add_step(run_id, str(line), "search", {"keywords": keywords, "country": run.request["country"],
+                                               "matches": found["total_matches"], "ids": [r["id"] for r in found["results"]]})
+    return found
+
+
+@mcp.tool()
+def check_price_comparability(run_id: str, candidate_ids: list[int], rejected: dict[str, str] | None = None,
+                              line: str = "1") -> dict:
+    """Build the price band for a line from the records you judged comparable, and judge the quoted price.
+
+    candidate_ids: records from this review's searches that describe the same product.
+    rejected: {id: reason} for records from this review's searches that you judged NOT comparable (another
+    model, a bundle, a lot price). They are left out of the band; the reasons appear in the report.
+    The price, currency and year come from the review. The tool also excludes records with invalid dates,
+    test entries, multi-item contracts, no unit price and duplicates, adjusts every price for inflation and
+    currency, and needs at least 5 records for a band. Records not found by this review's searches are refused.
+    """
+    run, entry, error = run_or_error(run_id, line)
+    if error:
+        return error
+    if quoted(entry) is None:
+        return {"error": f"No bidder priced line {line}, so there is no price to check."}
+    rejected = {record_id(k): v for k, v in (rejected or {}).items()}
+    candidates = [record_id(i) for i in candidate_ids]
+    found = {i for step in steps(run_id, str(line), "search") for i in step.data["ids"]}
+    if strangers := sorted((set(candidates) | set(rejected)) - found):
+        return {"error": f"Refused: records {strangers} were not returned by this review's searches. "
+                         "Search for them first with find_comparables."}
+    result = price_band(quoted(entry), run.request["currency"], run.request["year"], candidates,
+                        {str(k): v for k, v in rejected.items()})
+    if "error" not in result:
+        add_step(run_id, str(line), "check", {"candidate_ids": candidates,
+                                              "rejected": {str(k): v for k, v in rejected.items()}, "result": result})
+    return result
+
+
+@mcp.tool()
+def challenge_review(run_id: str, verdict: str, reason: str, objections: dict[str, str] | None = None,
+                     line: str = "1") -> dict:
+    """Record an independent second check of a line's price band: STANDS (a fair benchmark) or DISPUTED, why,
+    and objections {id: reason} to records in the band. The report shows it. To take records out, call
+    check_price_comparability again with them in `rejected`; objections left in the band are shown as such.
+    """
+    run, entry, error = run_or_error(run_id, line)
+    if error:
+        return error
+    checks = steps(run_id, str(line), "check")
+    if not checks or not checks[-1].data["result"].get("band"):
+        return {"error": "There is no price band to challenge on this line yet."}
+    in_band = {r["id"] for r in checks[-1].data["result"]["accepted"]}
+    objections = {record_id(k): v for k, v in (objections or {}).items()}
+    if strangers := sorted(set(objections) - in_band):
+        return {"error": f"Refused: records {strangers} are not in this line's band."}
+    verdict = verdict.strip().upper()
+    if verdict not in ("STANDS", "DISPUTED"):
+        return {"error": "verdict must be STANDS or DISPUTED."}
+    add_step(run_id, str(line), "challenge", {"verdict": verdict, "reason": reason,
+                                              "objections": {str(k): v for k, v in objections.items()}})
+    return {"recorded": True, "verdict": verdict, "objections": len(objections)}
+
+
+def review(run_id):
+    """Everything a report needs, rebuilt only from what the run recorded: (run, lines, states)."""
+    run = get_run(run_id)
+    states, by_item = {}, {}
+    for entry in run.lines:
+        recorded = steps(run_id, entry["line"])
+        checks = [s.data for s in recorded if s.kind == "check"]
+        if not checks:
+            if entry["item"].lower() in by_item:  # the same item on another line: one band serves both
+                states[entry["line"]] = by_item[entry["item"].lower()]
+            continue
+        final = checks[-1]["result"]
+        challenges = [s.data for s in recorded if s.kind == "challenge"]
+        challenge = {"verdict": "NOT RUN", "reason": "no independent second check was recorded", "remove": {}}
+        if challenges:
+            c = challenges[-1]
+            remove = {int(k): v for k, v in c["objections"].items()}
+            out = {e["id"] for e in final.get("excluded", [])}
+            challenge = {"verdict": c["verdict"], "reason": c["reason"], "remove": remove,
+                         "applied": all(i in out for i in remove) if remove else None}
+        plans = [s.data for s in recorded if s.kind == "plan"]
+        state = {"request": {**run.request, "item": entry["item"], "unit_price": quoted(entry)}, "final": final,
+                 "challenge": challenge, "plan": plans[-1] if plans else None,
+                 "searches": [{"keywords": s.data["keywords"], "country": s.data["country"], "matches": s.data["matches"]}
+                              for s in recorded if s.kind == "search"]}
+        states[entry["line"]] = by_item.setdefault(entry["item"].lower(), state)
+    return run, run.lines, states
+
+
+def version(run_id):
+    """A draft is of a run at one moment: the id of its last recorded step."""
+    recorded = steps(run_id)
+    return f"{run_id}@{recorded[-1].id if recorded else 0}"
+
+
+def discard_review(run_id):
+    """A rejected or revised draft: delete its files and row, and cancel its pending request."""
+    with engine().begin() as conn:
+        rows_ = conn.execute(select(REPORTS).where(REPORTS.c.run_id == run_id, REPORTS.c.status == "draft")).all()
+        conn.execute(REPORTS.delete().where(REPORTS.c.run_id == run_id, REPORTS.c.status == "draft"))
+    store = storage()
+    for row in rows_:
+        for file in row.files or []:
+            store.delete(file)
+    supersede("write_price_review", f"{run_id}@")
+
+
+@mcp.tool()
+def write_price_review(run_id: str, approval: str = "") -> dict:
+    """Write a review's report. A person must approve it before it becomes final.
+
+    Without approval: builds the draft only from what this review recorded (its plan, searches, checks and
+    second check), saves it, and replies with where it is and the command a person runs to approve it
+    (`fairprice --approve <request>`). With approval (a person's approval of this exact version of the review):
+    writes the final report under that person's name. If the review changed after the draft was made, the
+    approval is refused; write the draft again. Refused if the report cites no records or records that do not exist.
     """
     from fairprice import report as rep  # report imports this module
 
-    with engine().connect() as conn:
-        row = conn.execute(select(REPORTS).where(REPORTS.c.name == report, REPORTS.c.status == "draft")).first()
-    if row is None:
-        return {"error": f"Refused: {report!r} is not a draft report."}
-    data, cited = row.data, sorted(set(rep.cited(row.data)))
+    run = get_run(run_id)
+    if run is None:
+        return {"error": f"No review {run_id!r}."}
+    run, lines, states = review(run_id)
+    if not states:
+        return {"error": "Refused: nothing to report yet; run check_price_comparability first."}
+    cited = sorted({r["id"] for state in states.values() for key in ("accepted", "excluded")
+                    for r in (state.get("final") or {}).get(key, [])})
     if not cited:
         return {"error": "Refused: the report cites no source records."}
     known = {r["id"] for r in rows(f"SELECT id FROM lines WHERE id IN ({','.join('?' * len(cited))})", cited)}
     if missing := sorted(set(cited) - known):
         return {"error": f"Refused: cited records do not exist: {missing}"}
+    data = rep.build(run.title, lines, states, run.bidders, run.checks if run.kind == "package" else None,
+                     run.request, run_id)
+    costs = steps(run_id, kind="cost")
+    if costs:
+        data["report"]["cost"] = costs[-1].data
+    target, store, fmt = version(run_id), storage(), os.environ.get("FAIRPRICE_REPORT_FORMAT", "xlsx")
     if not approval:
-        request = request_approval("write_price_review", report)
-        return {"status": "needs_approval", "request": request,
+        discard_review(run_id)  # one draft per review: the latest
+        name = rep.draft_name(run.title, run_id)
+        written = rep.files(data, name, fmt)
+        for file, content in written.items():
+            store.save(file, content)
+        with engine().begin() as conn:
+            conn.execute(REPORTS.insert().values(name=name, run_id=run_id, status="draft", format=fmt,
+                                                 files=list(written), created_at=dt.datetime.now(dt.timezone.utc),
+                                                 data=data))
+        request = request_approval("write_price_review", target)
+        return {"status": "needs_approval", "request": request, "draft": name,
+                "files": [store.location(f) for f in written],
                 "message": f"A person must approve this report. In the terminal: uv run fairprice --approve {request}"}
-    granted = use_approval(approval, "write_price_review", report)
+    granted = use_approval(approval, "write_price_review", target)
     if granted is None:
-        return {"error": "Refused: that is not an unused human approval for this report."}
+        return {"error": "Refused: that is not an unused human approval for this version of the review. "
+                         "If the review changed, call write_price_review without approval for a new draft."}
+    with engine().connect() as conn:
+        draft = conn.execute(select(REPORTS).where(REPORTS.c.run_id == run_id, REPORTS.c.status == "draft")).first()
     now = dt.datetime.now().astimezone()
     data["report"].update(status="approved", approved_by=granted.approved_by, approved_at=now.isoformat(timespec="seconds"))
-    name = f"{now:%Y%m%d-%H%M%S}-{report.removeprefix('DRAFT-')}"
-    store, written = storage(), rep.files(data, name, row.format)
+    name = f"{now:%Y%m%d-%H%M%S}-{rep.draft_name(run.title, run_id).removeprefix('DRAFT-')}"
+    fmt = draft.format if draft else fmt
+    written = rep.files(data, name, fmt)
     for file, content in written.items():
         store.save(file, content)
-    for file in row.files or []:
-        store.delete(file)
+    discard_review(run_id)
     with engine().begin() as conn:
-        conn.execute(REPORTS.update().where(REPORTS.c.id == row.id).values(
-            name=name, status="approved", approved_by=granted.approved_by, approved_at=now, files=list(written), data=data))
-    return {"saved": name, "approved_by": granted.approved_by, "files": [store.location(f) for f in written],
-            "sources": len(cited)}
+        conn.execute(REPORTS.insert().values(name=name, run_id=run_id, status="approved", format=fmt,
+                                             files=list(written), approved_by=granted.approved_by,
+                                             created_at=now, approved_at=now, data=data))
+    return {"saved": name, "run_id": run_id, "approved_by": granted.approved_by,
+            "files": [store.location(f) for f in written], "sources": len(cited)}
 
 
 @mcp.tool()
-def get_price_review(name: str = "") -> dict:
-    """Retrieve an approved price review as JSON. Without a name, list the approved reviews, newest first.
+def get_price_review(run_id: str = "") -> dict:
+    """An approved review's report as JSON. Without a run_id, list the approved reviews, newest first.
 
-    With a name: the report's summary and approval, the price of every line and bidder, the past purchases it
-    cites (with their official record ids), and where its files are (paths, or links valid for one hour in S3).
+    With a run_id: the report's summary and approval, the price of every line and bidder, the past purchases
+    it cites (with their official record ids), each line's plan and searches, and where its files are.
     """
-    with engine().connect() as db:
-        if not name:
-            found = db.execute(select(REPORTS.c.name, REPORTS.c.approved_by, REPORTS.c.approved_at, REPORTS.c.format)
-                               .where(REPORTS.c.status == "approved").order_by(REPORTS.c.approved_at.desc()).limit(50)).all()
-            return {"reports": [{"name": r.name, "approved_by": r.approved_by, "format": r.format,
+    with engine().connect() as conn:
+        if not run_id:
+            found = conn.execute(select(REPORTS.c.run_id, REPORTS.c.name, REPORTS.c.approved_by, REPORTS.c.approved_at,
+                                        REPORTS.c.format).where(REPORTS.c.status == "approved")
+                                 .order_by(REPORTS.c.approved_at.desc()).limit(50)).all()
+            return {"reports": [{"run_id": r.run_id, "name": r.name, "approved_by": r.approved_by, "format": r.format,
                                  "approved_at": r.approved_at.isoformat() if r.approved_at else None} for r in found]}
-        row = db.execute(select(REPORTS).where(REPORTS.c.name == name, REPORTS.c.status == "approved")).first()
+        row = conn.execute(select(REPORTS).where(REPORTS.c.run_id == run_id, REPORTS.c.status == "approved")
+                           .order_by(REPORTS.c.id.desc())).first()
     if row is None:
-        return {"error": f"No approved report named {name!r}. Call get_price_review without a name to list them."}
+        return {"error": f"No approved report for review {run_id!r}. Call get_price_review without a run_id to list them."}
     store = storage()
     return {**row.data, "files": [store.location(f) for f in row.files or []]}
 
