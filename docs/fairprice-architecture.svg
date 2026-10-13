@@ -23,8 +23,8 @@
   <!-- Human: analyst -->
   <rect x="40" y="110" width="260" height="90" rx="10" fill="#fdf2e9" stroke="#d46222" stroke-width="1.6"/>
   <text x="60" y="140" class="h">Procurement analyst</text>
-  <text x="60" y="162" class="s">Enters item, quantity, unit</text>
-  <text x="60" y="180" class="s">and the price under review (CLI)</text>
+  <text x="60" y="162" class="s">Enters an item and its quoted price,</text>
+  <text x="60" y="180" class="s">or a whole bid package (CLI)</text>
 
   <!-- LLM -->
   <rect x="40" y="290" width="260" height="130" rx="10" fill="#eef3fb" stroke="#3b6fb6" stroke-width="1.6"/>
@@ -32,13 +32,13 @@
   <text x="60" y="344" class="t">Gemma 4 (open weights)</text>
   <text x="60" y="363" class="s">served locally by Ollama (default)</text>
   <text x="60" y="390" class="t">Qwen3 8B, or any other model</text>
-  <text x="60" y="408" class="s">swapped in for comparison runs</text>
+  <text x="60" y="408" class="s">or on any OpenAI-compatible server</text>
 
   <!-- Human: officer -->
   <rect x="40" y="520" width="260" height="100" rx="10" fill="#fdecea" stroke="#c0392b" stroke-width="1.6"/>
   <text x="60" y="550" class="h">Approving officer (named)</text>
-  <text x="60" y="572" class="s">Approves, edits or rejects the draft,</text>
-  <text x="60" y="590" class="s">or requests further investigation</text>
+  <text x="60" y="572" class="s">Approves, revises or rejects the draft;</text>
+  <text x="60" y="590" class="s">revise sends questions to the Analyst</text>
   <text x="60" y="608" class="s">Committee decides the award</text>
 
   <!-- Orchestrator -->
@@ -49,23 +49,23 @@
   <g>
     <rect x="390" y="170" width="480" height="50" rx="8" fill="#fff" stroke="#555"/>
     <text x="406" y="191" class="t" font-weight="700">1  Plan</text>
-    <text x="406" y="210" class="s">Analyst agent: normalise the item, choose search strategy</text>
+    <text x="406" y="210" class="s">Analyst records its search plan: keyword sets, most specific first</text>
 
     <rect x="390" y="240" width="480" height="66" rx="8" fill="#fff" stroke="#555"/>
     <text x="406" y="261" class="t" font-weight="700">2  Find and check comparables</text>
-    <text x="406" y="280" class="s">Rejects mismatched unit, pack size, year or currency;</text>
-    <text x="406" y="297" class="s">widens or re-runs the search when too few remain</text>
+    <text x="406" y="280" class="s">Rejects bundles, other models and lot prices, with reasons;</text>
+    <text x="406" y="297" class="s">self-check sends it to the next planned search if thin or empty</text>
     <path class="ln" d="M870,258 C905,258 905,290 870,290" marker-end="url(#a)"/>
     <text x="874" y="312" class="lbl">loop</text>
 
     <rect x="390" y="326" width="480" height="66" rx="8" fill="#fff" stroke="#555"/>
     <text x="406" y="347" class="t" font-weight="700">3  Challenger agent</text>
-    <text x="406" y="366" class="s">Tries to disprove every price flag with its own queries;</text>
-    <text x="406" y="383" class="s">only flags that survive, with sources, move on</text>
+    <text x="406" y="366" class="s">Tries to disprove the band with its own SQL; verdict recorded;</text>
+    <text x="406" y="383" class="s">Recheck applies removals only if 5 or more records remain</text>
 
     <rect x="390" y="412" width="480" height="50" rx="8" fill="#fff" stroke="#555"/>
     <text x="406" y="433" class="t" font-weight="700">4  Draft report</text>
-    <text x="406" y="452" class="s">Every finding cites its OCDS release ID</text>
+    <text x="406" y="452" class="s">Built only from the run's recorded steps; cites official record IDs</text>
 
     <rect x="390" y="482" width="480" height="50" rx="8" fill="#fdecea" stroke="#c0392b" stroke-width="1.6"/>
     <text x="406" y="503" class="t" font-weight="700">5  Human approval gate (interrupt)</text>
@@ -73,7 +73,7 @@
 
     <rect x="390" y="552" width="480" height="50" rx="8" fill="#fff" stroke="#555"/>
     <text x="406" y="573" class="t" font-weight="700">6  Save report</text>
-    <text x="406" y="592" class="s">Calls write_price_review with the approver's name</text>
+    <text x="406" y="592" class="s">write_price_review with the approval of this version of the run</text>
 
     <path class="ln" d="M630,220 V240" marker-end="url(#a)"/>
     <path class="ln" d="M630,306 V326" marker-end="url(#a)"/>
@@ -84,7 +84,7 @@
   <path d="M390,492 H373 V195 H390" stroke="#c0392b" stroke-width="1.6" fill="none" stroke-dasharray="6 4" marker-end="url(#g)"/>
   <text transform="translate(369,450) rotate(-90)" font-size="11" fill="#c0392b">further investigation</text>
   <text x="380" y="626" class="s">Stops when findings are supported, unresolved, or the step budget runs out</text>
-  <text x="380" y="646" class="s">Every tool call is logged: tool, inputs, outputs, timestamp, approver</text>
+  <text x="380" y="646" class="s">Every step is recorded under the run; every tool call is audit-logged</text>
 
   <!-- Human / LLM links -->
   <path class="ln" d="M300,155 H360" marker-end="url(#a)"/>
@@ -100,15 +100,19 @@
   <text x="980" y="130" class="h">fairprice-mcp  (built by us)</text>
   <text x="980" y="150" class="s">Python MCP SDK · stdio transport</text>
   <text x="980" y="180" class="t" font-weight="700">Tools</text>
-  <text x="990" y="203" class="m">find_comparables</text>
-  <text x="990" y="221" class="s">search past awards across countries</text>
-  <text x="990" y="246" class="m">check_price_comparability</text>
-  <text x="990" y="264" class="s">units, pack size, CPI and FX adjustment</text>
-  <text x="990" y="289" class="m">write_price_review</text>
-  <text x="990" y="307" class="s">saves report + audit entry (gated write)</text>
-  <text x="980" y="337" class="t" font-weight="700">Resources</text>
-  <text x="990" y="360" class="m">ocds://release/{id}</text>
-  <text x="990" y="378" class="s">original record behind each citation</text>
+  <text x="1030" y="180" class="s">(every step recorded under the run)</text>
+  <text x="990" y="200" class="m">start_review · start_package_review</text>
+  <text x="990" y="216" class="s">start a run: one item, or a whole bid package</text>
+  <text x="990" y="236" class="m">plan_searches · find_comparables</text>
+  <text x="990" y="252" class="s">record the search plan; search the run's country</text>
+  <text x="990" y="272" class="m">check_price_comparability · challenge_review</text>
+  <text x="990" y="288" class="s">band from the run's own search results; second check</text>
+  <text x="990" y="308" class="m">write_price_review · get_price_review</text>
+  <text x="990" y="324" class="s">draft; final only with a person's approval (gated)</text>
+  <text x="990" y="344" class="m">list_countries · add_country</text>
+  <text x="990" y="360" class="s">load a country's data (gated)</text>
+  <text x="990" y="380" class="m">ocds://line/{id}</text>
+  <text x="1130" y="380" class="s">record behind each citation</text>
 
   <rect x="960" y="420" width="400" height="110" rx="12" fill="#f3eefb" stroke="#6b4bb6" stroke-width="1.8"/>
   <text x="980" y="450" class="h">DuckDB MCP server  (borrowed)</text>
@@ -125,26 +129,26 @@
   <!-- Data layer -->
   <rect x="360" y="720" width="360" height="110" rx="10" fill="#fffbe6" stroke="#b7950b" stroke-width="1.6"/>
   <text x="380" y="750" class="h">DuckDB file (local)</text>
-  <text x="380" y="772" class="s">OCDS awards: KE, RW, TZ, NG, ZA, LR, GH, ZM, UG</text>
-  <text x="380" y="792" class="s">CPI and exchange-rate reference tables</text>
+  <text x="380" y="772" class="s">OCDS awards: Nigeria and Kenya by default,</text>
+  <text x="380" y="792" class="s">more with add_country; CPI and FX tables</text>
   <text x="380" y="812" class="s">Data stays on the machine</text>
 
   <rect x="760" y="720" width="300" height="110" rx="10" fill="#fffbe6" stroke="#b7950b" stroke-width="1.6"/>
-  <text x="780" y="750" class="h">Outputs (local)</text>
-  <text x="780" y="772" class="s">reports/  approved price reviews</text>
-  <text x="780" y="792" class="s">audit.jsonl  every tool call</text>
-  <text x="780" y="812" class="s">with inputs, outputs, time, approver</text>
+  <text x="780" y="750" class="h">Outputs (yours)</text>
+  <text x="780" y="772" class="s">reports: disk or your own S3/MinIO</text>
+  <text x="780" y="792" class="s">SQL: runs, steps, approvals, reports,</text>
+  <text x="780" y="812" class="s">audit log of every tool call</text>
 
   <rect x="40" y="700" width="260" height="70" rx="10" fill="#fff" stroke="#888" stroke-dasharray="5 4"/>
   <text x="60" y="728" class="h">OCDS bulk downloads</text>
-  <text x="60" y="750" class="s">public data from 9 portals</text>
+  <text x="60" y="750" class="s">OCP Data Registry, by country</text>
   <rect x="40" y="790" width="260" height="70" rx="10" fill="#fff" stroke="#888" stroke-dasharray="5 4"/>
   <text x="60" y="818" class="h">World Bank API</text>
   <text x="60" y="840" class="s">CPI and exchange rates</text>
   <path class="dash" d="M300,735 H360" marker-end="url(#a)"/>
   <path class="dash" d="M300,825 H330 V790 H360" marker-end="url(#a)"/>
   <text x="40" y="890" class="lbl">External APIs: fetched once by an ingest script, then the agent runs offline</text>
-  <text x="40" y="930" class="s" font-style="italic">Proposed design; not an implementation claim.</text>
+  <text x="40" y="930" class="s" font-style="italic">As built. Measured results: EVALS.md.</text>
 
   <path class="ln" d="M960,365 H930 V690 H600 V720" marker-end="url(#a)"/>
   <text x="936" y="684" class="lbl">reads</text>
