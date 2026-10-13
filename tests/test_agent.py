@@ -9,7 +9,6 @@ from unittest import mock
 
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
-from langgraph.types import Command
 
 import conftest
 from conftest import ScriptedModel, fake_session, ids

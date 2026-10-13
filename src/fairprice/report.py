@@ -96,7 +96,10 @@ def cells(lines, states, bidders):
             if status is None:
                 ratio, a = assess(price, band["median"])
                 status = a.split(":")[0]
-            out[(entry["line"], b)] = {"price": price, "status": status, "ratio": ratio}
+            budget = entry.get("budget")
+            out[(entry["line"], b)] = {"price": price, "status": status, "ratio": ratio,
+                                       "budget": budget, "times_budget": round(price / budget, 2)
+                                       if price is not None and budget else None}
     return out
 
 
@@ -118,8 +121,25 @@ def sources(lines, states):
     return {i: n for n, i in enumerate(order, 1)}, info
 
 
+PPRA = {  # what each finding means under PPRA's standard tender document for goods (Kenya); the committee decides
+    "arithmetic_error": "Under the PPRA standard tender document (ITT 30.2), a miscalculation of unit price, quantity "
+                        "or total is a major deviation that makes the tender non-responsive.",
+    "quantity_changed": "The PPRA standard tender document asks the committee to confirm that every requirement of the "
+                        "Schedule of Requirements is met without material deviation (ITT 28.2).",
+    "missing_line": "Under the PPRA standard tender document (ITT 29.3), a missing item is priced at the average of "
+                    "the other responsive tenders, for comparison only, unless the tender data sheet makes unquoted "
+                    "items disqualifying.",
+    "identical_prices": "Each tenderer signs a Certificate of Independent Tender Determination with the Form of Tender.",
+}
+
+
 def check_text(c, cur):
-    """A bid file problem as one plain sentence, naming where in the file it came from."""
+    """A bid file problem in plain sentences, naming where in the file it came from and what PPRA's rules say."""
+    rule = f" {PPRA[c['check']]}" if c["check"] in PPRA else ""
+    return problem_text(c, cur) + rule
+
+
+def problem_text(c, cur):
     where = f"{c['bidder']}, line {c['line']}" + (f" ({c['where']})" if c.get("where") else "")
     d = c.get("data") or {}
     if c["check"] == "arithmetic_error":
@@ -152,7 +172,8 @@ def summary(lines, states, bidders, checks, base):
             c = cs[(entry["line"], b)]
             label, icon, _ = STATUS[c["status"]]
             ratio = f" ({c['ratio']:g}× typical)" if c["status"] in ("above_band", "below_band") else ""
-            out.append(f"    {b:<20} {money(c['price'], cur, True):>10}  {icon} {label}{ratio}")
+            over = (f"; {c['times_budget']:g}× the budget" if c["times_budget"] and c["times_budget"] > 1 else "")
+            out.append(f"    {b:<20} {money(c['price'], cur, True):>10}  {icon} {label}{ratio}{over}")
     if checks:
         out.append(f"Problems in the bid files: {len(checks)}")
         out += [f"    - {check_text(c, cur)}" for c in checks]
@@ -168,6 +189,7 @@ def build(title, lines, states, bidders, checks, base, run_id, model=""):
     cur, year = base["currency"], base["year"]
     cs = cells(lines, states, bidders)
     refs, info = sources(lines, states)
+    budgets = any(e.get("budget") for e in lines)  # the budget columns only when the BoQ has budgets
     prices = []
     for entry in lines:
         final = (states.get(entry["line"]) or {}).get("final") or {}
@@ -178,6 +200,7 @@ def build(title, lines, states, bidders, checks, base, run_id, model=""):
                 "line": entry["line"], "item": entry["item"], "quantity_requested": entry["quantity"], "bidder": b,
                 "quoted_price": c["price"], "typical_past_price": round(band["median"]) if band else None,
                 "times_typical": c["ratio"], "result": STATUS[c["status"]][0],
+                **({"budget_per_item": c["budget"], "times_budget": c["times_budget"]} if budgets else {}),
                 "past_purchases_compared": band["n"] if band else len(final.get("accepted", [])),
                 "sources": sorted(refs[r["id"]] for r in final.get("accepted", [])),
                 "problems": [check_text(k, cur) for k in checks or []
@@ -221,6 +244,7 @@ def headings(data):
               "quoted_price": f"Quoted price per item ({cur})",
               "typical_past_price": f"Typical past price ({cur}, {year} money)",
               "times_typical": "Times the typical price", "result": "Result",
+              "budget_per_item": f"Budget per item ({cur})", "times_budget": "Times the budget",
               "past_purchases_compared": "Past purchases compared",
               "sources": "Sources (Ref numbers)", "problems": "Problems in this bid"}
     srcs = {"ref": "Ref", "bought_by": "Bought by", "year": "Year", "what_was_bought": "What was bought",
@@ -283,9 +307,10 @@ def workbook(data, prices, srcs):
     wb = Workbook()
     ws = wb.active
     ws.title = "Prices"
-    table(ws, prices, (6, 30, 11, 18, 16, 18, 11, 24, 11, 16, 60), status,
+    budgets = bool(prices) and f"Budget per item ({cur})" in prices[0]
+    table(ws, prices, (6, 30, 11, 18, 16, 18, 11, 24) + ((16, 11) if budgets else ()) + (11, 16, 60), status,
           {f"Quoted price per item ({cur})": money_fmt, f"Typical past price ({cur}, {year} money)": money_fmt,
-           "Times the typical price": '0.00"×"'})
+           "Times the typical price": '0.00"×"', f"Budget per item ({cur})": money_fmt, "Times the budget": '0.00"×"'})
     fills = {label: colour for label, _, colour in STATUS.values() if colour}
     for row, r in enumerate(data["prices"], 2):
         if fill := fills.get(r["result"]):

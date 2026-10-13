@@ -55,7 +55,7 @@ async def run_package(graph, case, model):
     """A whole bid package: per-bidder assessments from the shared bands, judged from the run as recorded
     (a replay of its steps), and nothing saved or ranked."""
     usage = agent.Usage()
-    base = {"currency": "NGN", "year": case["year"], "country": "NG"}
+    base = server.review_request(case.get("currency"), case["year"], case.get("country", "NG"))
     run_id = None
     start = time.perf_counter()
     try:  # everything, including reading the package: one bad case must not stop the suite
@@ -88,7 +88,7 @@ async def run_case(graph, tools, case, model):
     try:  # a crash is a failed run, not a reason to stop the suite
         started = agent.as_json(agent.tool_text(await tools["start_review"].ainvoke(
             {"item": case["item"], "unit_price": case["unit_price"], "year": case["year"],
-             "currency": case.get("currency", "NGN"), "country": case.get("country", "NG")})))
+             "currency": case.get("currency", ""), "country": case.get("country", "NG")})))
         run_id = agent.CURRENT_RUN = started["run_id"]
         req = {"run_id": run_id, "line": "1", "item": case["item"], "unit_price": case["unit_price"],
                "currency": started["currency"], "year": started["year"], "country": started["country"]}
@@ -224,10 +224,11 @@ def deterministic_checks():
     packages = [batch.load(ROOT / "examples" / f"bid-package.{ext}")[0] for ext in ("xlsx", "csv", "json")]
     results.append({"case": "the xlsx, csv and json templates read to the same bid package",
                     "passed": packages[0] == packages[1] == packages[2], "detail": None})
-    bad = {"unknown column": "bidder,line,item,quantity,rate\nBoQ,1,Laptop,2,\nBidder A,1,,2,500\n",
-           "price in words": "bidder,line,item,quantity,unit_price\nBoQ,1,Laptop,2,\nBidder A,1,,2,two million\n",
-           "line not in the BoQ": "bidder,line,item,quantity,unit_price\nBoQ,1,Laptop,2,\nBidder A,9,,2,500\n",
-           "no BoQ": "bidder,line,item,quantity,unit_price\nBidder A,1,,2,500\n"}
+    head = "Bidder,Item No,Description,Quantity,Unit Price\n"
+    bad = {"unknown column": "Bidder,Item No,Description,Quantity,Price per piece\nBoQ,1,Laptop,2,\nBidder A,1,,2,500\n",
+           "price in words": head + "BoQ,1,Laptop,2,\nBidder A,1,,2,two million\n",
+           "line not in the BoQ": head + "BoQ,1,Laptop,2,\nBidder A,9,,2,500\n",
+           "no BoQ": head + "Bidder A,1,,2,500\n"}
     for name, text in bad.items():
         path = Path(tempfile.mkdtemp()) / "package.csv"
         path.write_text(text)

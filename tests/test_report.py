@@ -22,10 +22,10 @@ def checked(run, line, candidates, rejected=None):
     return server.check_price_comparability(run, candidates, rejected, line)
 
 
-def package_run(title="pkg"):
+def package_run(title="pkg", budget=None):
     """Two lines, three bidders: one line with a band, one with too few records, and one bidder missing a line."""
     lines = [{"line": "1", "item": "Toyota Hilux double cabin pickup", "quantity": 2,
-              "prices": {"A": 95e6, "B": 300e6, "C": 40e6}},
+              "prices": {"A": 95e6, "B": 300e6, "C": 40e6}, **({"budget": budget} if budget else {})},
              {"line": "2", "item": "Laptop computer", "quantity": 10, "prices": {"A": 2e6, "B": 2.1e6}}]
     checks = [{"check": "arithmetic_error", "bidder": "B", "line": "1", "where": "sheet “B”, row 2",
                "data": {"quantity": 2, "unit_price": 300e6, "total": 700e6}},
@@ -75,7 +75,10 @@ def test_check_sentences():
     assert "does not add up" in report.check_text({**where, "check": "arithmetic_error",
                                                    "data": {"quantity": 2, "unit_price": 5, "total": 11}}, "NGN")
     assert "asks for 2" in report.check_text({**where, "check": "quantity_changed", "data": {"quoted": 1, "requested": 2}}, "NGN")
-    assert report.check_text({**where, "check": "missing_line", "data": {"item": "Laptop"}}, "NGN") == "B did not price line 2 (Laptop)."
+    missing = report.check_text({**where, "check": "missing_line", "data": {"item": "Laptop"}}, "NGN")
+    assert missing.startswith("B did not price line 2 (Laptop). Under the PPRA standard tender document (ITT 29.3)")
+    assert "major deviation" in report.check_text({**where, "check": "arithmetic_error",
+                                                   "data": {"quantity": 2, "unit_price": 5, "total": 11}}, "NGN")
     assert "A and C quoted exactly the same" in report.check_text(
         {"check": "identical_prices", "bidder": "A, C", "line": "1, 2", "where": None, "data": {"same": 2, "shared": 2}}, "NGN")
     assert report.check_text({**where, "check": "something_new", "data": {}}, "NGN") == "B, line 2 (row 3): something_new."
@@ -95,7 +98,8 @@ def test_report_data_cites_its_records_and_never_ranks(package):
     assert [p["bidder"] for p in data["prices"][:3]] == bidders  # the file's order, not ranked
     assert data["prices"][0]["sources"] and data["prices"][2]["result"] == "Well below past prices"
     assert len({s["record_id"] for s in data["sources"]}) == len(data["sources"]) >= 8
-    assert data["report"]["bid_file_checks"][1] == "C did not price line 2 (Laptop computer)."
+    assert data["report"]["bid_file_checks"][1].startswith("C did not price line 2 (Laptop computer). Under the PPRA")
+    assert "budget_per_item" not in data["prices"][0]  # no budget in this BoQ, so no budget columns
     assert not any("rank" in k or "total" in k for k in data["prices"][0])
     single = report.build("x", *report.single(states["1"]), None, states["1"]["request"], "run2")
     assert single["report"]["bid_file_checks"] is None and single["prices"][0]["bidder"] == "Price under review"
@@ -181,3 +185,16 @@ def test_opening_the_draft_only_when_asked(monkeypatch):
     with mock.patch("os.startfile", create=True) as start:
         agent.open_draft("R.xlsx")
     start.assert_called_once()
+
+
+def test_budget_columns_when_the_boq_has_budgets():
+    record, lines, states = server.review(package_run("budgets", budget=100e6))
+    data = report.build("pkg", lines, states, record.bidders, record.checks, BASE, "b1")
+    a, b = data["prices"][0], data["prices"][1]
+    assert (a["budget_per_item"], a["times_budget"], b["times_budget"]) == (100e6, 0.95, 3.0)
+    assert data["prices"][3]["budget_per_item"] is None  # line 2 has no budget
+    assert "Well above past prices (" in report.summary(lines, states, record.bidders, [], BASE) and \
+        "3× the budget" in report.summary(lines, states, record.bidders, [], BASE)
+    ws = load_workbook(io.BytesIO(report.files(data, "B", "xlsx")["B.xlsx"]))["Prices"]
+    assert ws["I1"].value == "Budget per item (NGN)" and ws["H1"].value == "Result"
+    assert ws["H3"].fill.fgColor.rgb.endswith("F8D7D7")  # the result colour stays on the Result column

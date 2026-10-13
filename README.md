@@ -164,17 +164,33 @@ uv run fairprice --package examples/bid-package.xlsx --year 2025    # or .csv, o
 
 `examples/bid-package.xlsx`, `.csv` and `.json` are the same **synthetic** package in three forms: three invented bidders, invented prices and four planted problems. Use them as templates. All three must match one schema, [`src/fairprice/bid_package.schema.json`](src/fairprice/bid_package.schema.json), which another system can use to check a file before sending it.
 
+**The spreadsheet columns are those of a PPRA price schedule**, the form that Kenya's Public Procurement Regulatory Authority's standard tender documents ask every bidder to fill in (Item No, Description, Unit, Quantity, Unit Price, Total Price). A bidder's schedule can be pasted in as it is. The headings other procuring entities use for the same columns are accepted too:
+
+| Field | Accepted headings (any case; notes in brackets and a currency such as "in KES" are ignored) | Where |
+|---|---|---|
+| line | Item No, Item Number | BoQ and bids (required) |
+| item | Description, Description of Goods | BoQ (required), bids (optional) |
+| unit | Unit, Unit of Issue, Unit of Measure | optional |
+| quantity | Quantity, Qty | BoQ (required), bids (optional) |
+| unit_price | Unit Price, Rate, Unit Rate | bids (required) |
+| total | Total Price, Total Amount, Total | bids (optional) |
+| country_of_origin | Country of Origin | bids (optional) |
+| budget | Budget per unit | BoQ (optional): the procuring entity's budget per unit, shown in the report against each quote |
+| bidder | Bidder, Tenderer | csv only |
+
+So KRA's "Rate in KES (VAT inclusive)" and "Total Amount (KES)" read as the unit price and the total.
+
 | Form | Layout |
 |---|---|
-| xlsx | A sheet named `BoQ` with columns `line`, `item`, `quantity`. One sheet per bidder, named after the bidder, with columns `line`, `unit_price`, and optionally `quantity`, `total`, `item`. |
-| csv | One file with columns `bidder`, `line`, `item`, `quantity`, `unit_price`, `total`. Rows whose bidder is `BoQ` are the bill of quantities; every other value is a bidder. |
-| json | `{"boq": [{"line", "item", "quantity"}], "bids": [{"bidder", "lines": [{"line", "unit_price", "quantity", "total"}]}]}` |
+| xlsx | A sheet named `BoQ` (Item No, Description, Unit, Quantity, Budget per unit). One sheet per bidder, named after the bidder, with that bidder's price schedule (Item No, Description, Unit, Quantity, Unit Price, Total Price). |
+| csv | One file with a Bidder column and the same headings. Rows whose bidder is `BoQ` are the bill of quantities; every other value is a bidder. |
+| json | `{"boq": [{"line", "item", "unit", "quantity", "budget"}], "bids": [{"bidder", "lines": [{"line", "item", "unit", "quantity", "unit_price", "total"}]}]}` |
 
-**FairPrice does not interpret a package; it checks it.** Column names must be exactly those above. Prices must be plain numbers (`2500000`, `2,500,000` or `2500000.50`). Every bid line must be a line in the BoQ. A package that breaks any rule is refused before any analysis, with each problem and where it is, for example:
+**FairPrice does not interpret a package; it checks it.** Every column must have one of the headings above, and only one column may have each meaning. Prices must be plain numbers (`2500000`, `2,500,000` or `2500000.50`). Every bid line must be a line in the BoQ. A package that breaks any rule is refused before any analysis, with each problem and where it is, for example:
 
 ```
-- sheet “Bidder B”, row 1: unknown column(s) rate; the columns are line, unit_price, quantity, total, item
-- bid-package.csv, row 7, unit_price: 'NGN 2,500,000' is not a number
+- sheet “Bidder B”, row 1: unknown column(s) Price per piece; the columns are Item No, Description, Unit, Quantity, Unit Price, Total Price, Country of Origin
+- bid-package.csv, row 7, Unit Price: 'NGN 2,500,000' is not a number
 - bids[0].lines[0]: 'unit_price' is a required property
 ```
 
@@ -188,7 +204,9 @@ Read bid-package.xlsx: BoQ with 3 lines, 3 bidders
   Bidder C: 2 of 3 lines priced (not priced: 3)
 ```
 
-**What you get:** one draft report for the whole package, in the same two-table layout and your chosen format. The bid file checks appear in each bidder's "Problems in this bid" column, in plain sentences that name the sheet and row: totals that do not add up, missing lines, quantities that differ from the bill of quantities, and bidders quoting identical prices on most lines. Bidders appear in the order the file lists them, and are never totalled or ranked.
+**What you get:** one draft report for the whole package, in the same two-table layout and your chosen format. If the BoQ has budgets, each quote is also shown against its line's budget ("Times the budget"). The bid file checks appear in each bidder's "Problems in this bid" column, in plain sentences that name the sheet and row: totals that do not add up, missing lines, quantities that differ from the bill of quantities, and bidders quoting identical prices on most lines. Each finding also says what PPRA's standard tender document for goods says about it, for example "a miscalculation of unit price, quantity or total is a major deviation that makes the tender non-responsive (ITT 30.2)". A tender's own data sheet can be stricter (KRA's makes any unquoted item disqualifying), and the committee decides. Bidders appear in the order the file lists them, and are never totalled or ranked.
+
+**Why this is a step in the procedure, not an extra.** PPRA's standard tender document tells the procuring entity what to do with an abnormally high tender (ITT 36): "make a survey of the market prices" and "check if the estimated cost of the contract is correct". FairPrice is that survey, from published past awards, with every price sourced; with a budget in the BoQ, it also shows whether the budget itself is in line with past prices. For an abnormally low tender (ITT 35), the entity asks the bidder for a price analysis; FairPrice's "well below past prices" is where to start.
 
 You approve, revise or reject the package once. On `revise`, you also choose which lines to redo.
 
@@ -196,7 +214,7 @@ The agent runs once per distinct item, not once per bidder, so three bidders tak
 
 ### Designed, not built yet: reading bid files in any layout
 
-Real bids arrive in many layouts: title rows above the headings, "Rate" or "Amount" instead of `unit_price` and `total`, VAT and subtotal rows. Today a committee copies such a schedule into the template by hand. That is deliberate: a person, not FairPrice, decides what "Rate" means.
+Real bids still arrive in layouts the headings above do not cover: title rows above the headings, merged cells, section rows ("Glazing", "Gypsum boards"), VAT and subtotal rows. Today a committee copies such a schedule into the template by hand. That is deliberate: a person, not FairPrice, decides what an unfamiliar column means.
 
 The next step we designed is to let the model propose the mapping, never the values:
 
@@ -253,7 +271,7 @@ uv run --directory /path/to/FairPrice python -m fairprice.server
 
 A review is one **run** that links all the tool calls. The other app does what FairPrice's own agent does:
 
-1. `start_review(item, unit_price, currency, year, country)` → a `run_id` (or `start_package_review(package, …)` for a whole bid package);
+1. `start_review(item, unit_price, currency, year, country)` → a `run_id` (or `start_package_review(package, …)` for a whole bid package); the currency defaults to the country's;
 2. `plan_searches(run_id, searches)`: the keyword sets it will try, most specific first;
 3. `find_comparables(run_id, keywords)`: past awards in the run's country; every word must match, in any order;
 4. `check_price_comparability(run_id, candidate_ids, rejected)`: the band and the verdict. Only records the run's own searches found are accepted; the price, currency and year come from the run;
@@ -313,7 +331,7 @@ Created when you run it (not in the repo): `data/` (downloads, database, run sta
 uv run pytest --cov
 ```
 
-86 tests, 99% line and branch coverage, about 30 seconds, and no model or network needed. They run against a small synthetic dataset built through the real ingest (registry, downloads and World Bank mocked): a Nigeria-style publication with item quantities and the traps the agent must handle (a bundle, a placeholder date, a test record, a duplicate, a multi-item contract), a Kenya-style one with award totals only, and a Rwanda-style one with prices per item. A scripted model stands in for Gemma, so the agent graph, the approval gate, the CLI, the bid packages and the eval runner all run for real; one integration test starts both MCP servers as subprocesses over stdio. The tests never touch `data/`, `reports/` or your database.
+89 tests, 99% line and branch coverage, about 30 seconds, and no model or network needed. They run against a small synthetic dataset built through the real ingest (registry, downloads and World Bank mocked): a Nigeria-style publication with item quantities and the traps the agent must handle (a bundle, a placeholder date, a test record, a duplicate, a multi-item contract), a Kenya-style one with award totals only, and a Rwanda-style one with prices per item. A scripted model stands in for Gemma, so the agent graph, the approval gate, the CLI, the bid packages and the eval runner all run for real; one integration test starts both MCP servers as subprocesses over stdio. The tests never touch `data/`, `reports/` or your database.
 
 The tests prove the code does what it should. They do not measure how good the model's judgement is; that is what the evals are for (EVALS.md).
 
@@ -324,8 +342,10 @@ Out of the box, FairPrice loads Nigeria and Kenya. Any country with data on the 
 ```bash
 uv run fairprice-ingest --list       # countries with data, and which are loaded
 uv run fairprice-ingest --add RW     # add Rwanda
-uv run fairprice --country RW --currency RWF "laptop" --unit-price 900000 --year 2025
+uv run fairprice --country RW "laptop" --unit-price 900000 --year 2025
 ```
+
+Prices are taken to be in the country's own currency (RWF for Rwanda, read from its published data). If a quote is in another currency, say so with `--currency`, for example `--currency USD`; past prices are then converted at the World Bank's exchange rates.
 
 The same two actions are MCP tools on our server, `list_countries` and `add_country`, so an AI app can add a country. `add_country` runs in the background, because a large country takes minutes; `list_countries` shows its progress.
 
@@ -338,6 +358,8 @@ Whether a country can give prices per item depends on what it publishes. FairPri
 | A unit price for each contract item | Rwanda | Prices per item, one record per item |
 | A quantity for each contract item | Nigeria | Prices per item for single-item contracts (contract value ÷ quantity) |
 | Award totals, no quantities | Kenya | Searches only; every price check ends in "No comparison possible" |
+
+**So a Kenyan bid package can be read and checked today, but not benchmarked against Kenyan past prices.** The bid format follows Kenya's PPRA, and the bid file checks work on any package. Kenya's published awards carry no quantities, so they give no price per item. Until they do, a Kenyan package's prices can be compared with another loaded country's past awards (`--country NG --currency KES`, converted at World Bank exchange rates and adjusted for inflation), which is evidence of a different market and should be read as such.
 
 ## Data and its limits
 

@@ -160,6 +160,22 @@ def price_band(unit_price, currency, year, candidate_ids, rejected=None):
     return result
 
 
+def country_currency(country):
+    """The currency a loaded country publishes its awards in, or None if the country is not loaded."""
+    found = rows("SELECT currency FROM sources WHERE country = ? AND currency IS NOT NULL "
+                 "GROUP BY currency ORDER BY count(*) DESC LIMIT 1", (country.upper(),))
+    return found[0]["currency"] if found else None
+
+
+def review_request(currency, year, country):
+    """A review's currency, year and country; the currency defaults to the country's. None if not loaded."""
+    currency = (currency or country_currency(country) or "").upper()
+    return {"currency": currency, "year": year or dt.date.today().year, "country": country.upper()} if currency else None
+
+
+NOT_LOADED = "Country {} is not loaded, so it has no currency or past prices. See list_countries; add it with add_country."
+
+
 # ---------------------------------------------------------------- runs: one review across many calls
 
 def run_or_error(run_id, line):
@@ -179,19 +195,20 @@ def quoted(entry):
 
 
 @mcp.tool()
-def start_review(item: str, unit_price: float, currency: str = "NGN", year: int | None = None,
+def start_review(item: str, unit_price: float, currency: str = "", year: int | None = None,
                  country: str = "NG") -> dict:
     """Start a price review of one item: what is being bought and the price quoted for it. Returns its run_id;
     every other step of the review uses it, and is recorded under it, so the report is built only from what
     this review's own searches and checks found.
 
+    currency: of the quoted price (default the country's currency).
     year: when the price was quoted (default this year); past prices are adjusted for inflation to it.
     country: ISO code of a loaded country whose past awards to compare with (see list_countries).
     """
     if not item.strip() or unit_price <= 0:
         return {"error": "Give the item and a quoted unit price above zero."}
-    year = year or dt.date.today().year
-    request = {"currency": currency.upper(), "year": year, "country": country.upper()}
+    if (request := review_request(currency, year, country)) is None:
+        return {"error": NOT_LOADED.format(country.upper())}
     lines = [{"line": "1", "item": item.strip(), "quantity": None, "prices": {"Price under review": unit_price}}]
     run_id = start_run("item", item.strip(), request, lines, ["Price under review"])
     return {"run_id": run_id, "lines": lines, **request,
@@ -199,7 +216,7 @@ def start_review(item: str, unit_price: float, currency: str = "NGN", year: int 
 
 
 @mcp.tool()
-def start_package_review(package: dict, title: str = "bid package", currency: str = "NGN", year: int | None = None,
+def start_package_review(package: dict, title: str = "bid package", currency: str = "", year: int | None = None,
                          country: str = "NG") -> dict:
     """Start a review of a whole bid package: a bill of quantities and every bidder's price schedule, in the bid
     package format (bid_package.schema.json: {"boq": [{line, item, quantity}], "bids": [{bidder, lines: [{line,
@@ -215,7 +232,8 @@ def start_package_review(package: dict, title: str = "bid package", currency: st
     boq, bidders = batch.unpack(package)
     checks = batch.file_checks(boq, bidders)
     lines = batch.package_lines(boq, bidders)
-    request = {"currency": currency.upper(), "year": year or dt.date.today().year, "country": country.upper()}
+    if (request := review_request(currency, year, country)) is None:
+        return {"error": NOT_LOADED.format(country.upper())}
     run_id = start_run("package", title, request, lines, list(bidders), checks)
     return {"run_id": run_id, "lines": lines, "bidders": list(bidders), **request,
             "bid_file_problems": len(checks)}

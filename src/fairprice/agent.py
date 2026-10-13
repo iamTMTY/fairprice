@@ -681,7 +681,7 @@ async def run(args):
             run_id, payload = args.resume, None
         else:
             started = as_json(tool_text(await tools["start_review"].ainvoke(
-                {"item": args.item, "unit_price": args.unit_price, "currency": args.currency, "year": args.year,
+                {"item": args.item, "unit_price": args.unit_price, "currency": args.currency or "", "year": args.year,
                  "country": args.country})))
             if "error" in started:
                 raise SystemExit(started["error"])
@@ -711,7 +711,7 @@ def main():
     p = argparse.ArgumentParser(description="Prepare a sourced price-reasonableness file.")
     p.add_argument("item", nargs="?", help="what is being bought, e.g. 'Toyota Hilux double cabin'")
     p.add_argument("--unit-price", type=float)
-    p.add_argument("--currency", default="NGN", help="currency of the quoted prices, e.g. NGN, KES, RWF")
+    p.add_argument("--currency", help="currency of the quoted prices, e.g. NGN, KES, RWF (default: the country's)")
     p.add_argument("--year", type=int, default=dt.date.today().year)
     p.add_argument("--country", default="NG", help="ISO code of a loaded country (see fairprice-ingest --list)")
     p.add_argument("--package", "--sheet", dest="sheet", metavar="FILE",

@@ -36,12 +36,15 @@ def refused(path):
 
 def test_refusals_name_the_problem_and_where_it_is(tmp_path):
     wb = load_workbook(EXAMPLES / "bid-package.xlsx")
-    wb["Bidder B"]["B1"] = "Rate"
-    wb["Bidder A"]["E2"] = "stray"  # a value under no heading
+    wb["Bidder B"]["E1"] = "Price per piece"
+    wb["Bidder A"]["G2"] = "stray"  # a value under no heading
+    wb["Bidder C"]["C1"] = "Rate"  # a second unit price column
     wb.save(tmp_path / "a.xlsx")
     problems = refused(tmp_path / "a.xlsx")
-    assert "sheet “Bidder B”, row 1: unknown column(s) rate" in problems and "missing column(s) unit_price" in problems
+    assert "sheet “Bidder B”, row 1: unknown column(s) Price per piece" in problems
+    assert "missing column(s) Unit Price" in problems and "the columns are Item No, Description" in problems
     assert "sheet “Bidder A”, row 2: a value in a column with no name" in problems
+    assert "sheet “Bidder C”, row 1: more than one column for Unit Price" in problems
     wb = load_workbook(EXAMPLES / "bid-package.xlsx")
     wb.remove(wb["BoQ"])
     wb.create_sheet("Empty")
@@ -51,9 +54,9 @@ def test_refusals_name_the_problem_and_where_it_is(tmp_path):
 
 
 def test_csv_refusals(tmp_path):
-    head = "bidder,line,item,quantity,unit_price,total\n"
-    cases = {"BoQ,1,Laptop,2,,\nBidder A,1,,2,NGN 5,\n": "row 3, unit_price: 'NGN 5' is not a number",
-             "BoQ,1,Laptop,2,5,\n": "a BoQ row has no unit_price",
+    head = "Tenderer,Item No.,Description,Qty,Rate in KES (VAT inclusive),Total Amount (KES)\n"  # KRA's headings
+    cases = {"BoQ,1,Laptop,2,,\nBidder A,1,,2,NGN 5,\n": "row 3, Rate in KES (VAT inclusive): 'NGN 5' is not a number",
+             "BoQ,1,Laptop,2,5,\n": "a BoQ row has no Unit Price",
              ",1,Laptop,2,,\n": "no bidder (write BoQ",
              "Bidder A,1,,2,5,\n": "no BoQ rows",
              "BoQ,1,Laptop,2,,\nBoQ,1,Laptop,2,,\nBidder A,1,,2,5,\nBidder A,1,,2,6,\nBidder A,7,,2,6,\n":
@@ -82,6 +85,16 @@ def test_json_refusals(tmp_path):
     with pytest.raises(batch.PackageError) as e:
         batch.load(tmp_path / "broken.json")
     assert "was not read: it does not match the bid package format" in str(e.value)
+
+
+def test_ppra_headings_and_budgets():
+    for heading, field in (("Item No.", "line"), ("Rate in KES (VAT inclusive)", "unit_price"), ("QTY", "quantity"),
+                           ("Total Amount (KES)", "total"), ("Budget per unit (KES)", "budget"), ("Tenderer", "bidder")):
+        assert batch.FIELD[batch.plain(heading)] == field
+    assert batch.plain("price in words") not in batch.FIELD
+    boq, bidders = batch.read_package(EXAMPLES / "bid-package.xlsx")
+    assert boq[1]["unit"] == "No" and boq[1]["budget"] == 2400000
+    assert batch.package_lines(boq, bidders)[1]["budget"] == 2400000
 
 
 def test_cells_read_as_written():
@@ -139,6 +152,8 @@ def test_full_package_run_with_revise_and_approve(session, answers, capsys, monk
     asyncio.run(batch.run(argparse.Namespace(**{**vars(args), "resume": run})))
     out = capsys.readouterr().out
     assert f"Review {run} |" in out and "reusing the finished result" in out
+    with pytest.raises(SystemExit, match="Country ZZ is not loaded"):
+        asyncio.run(batch.run(argparse.Namespace(**{**vars(args), "country": "zz", "currency": None})))
     bad = argparse.Namespace(**{**vars(args), "sheet": str(EXAMPLES / "missing.txt")})
     with pytest.raises(SystemExit, match="was not read"):
         asyncio.run(batch.run(bad))

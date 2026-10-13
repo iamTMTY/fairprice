@@ -175,3 +175,13 @@ def test_a_package_review_is_one_run_with_a_line_per_boq_line():
     band = server.check_price_comparability(run, ids(HILUX))
     assert band["price_under_review"] == 97e6  # the median of the bidders' prices
     assert "error" in server.start_package_review({"boq": []})
+
+
+def test_the_currency_defaults_to_the_countrys():
+    assert server.country_currency("ke") == "KES" and server.country_currency("ZZ") is None
+    assert server.start_review("Laptop computer", 2e6, country="KE")["currency"] == "KES"
+    assert server.start_review("Laptop computer", 2e6, "usd", country="NG")["currency"] == "USD"  # unless given
+    assert "is not loaded" in server.start_review("Laptop computer", 2e6, country="ZZ")["error"]
+    assert "is not loaded" in server.start_package_review({"boq": [{"line": "1", "item": "x", "quantity": 1}],
+                                                           "bids": [{"bidder": "A", "lines": [{"line": "1", "unit_price": 1}]}]},
+                                                          country="ZZ")["error"]

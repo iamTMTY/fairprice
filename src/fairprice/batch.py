@@ -5,11 +5,14 @@ Usage:
   or, from any MCP client, the start_package_review tool with the package as JSON
 
 A package must match bid_package.schema.json exactly; one that does not is refused with every problem and where it
-is, never interpreted. The three forms of the same package:
-  xlsx  a sheet named "BoQ" (columns line, item, quantity) and one sheet per bidder, named after the bidder
-        (columns line, unit_price, and optionally quantity, total, item)
-  csv   one file with columns bidder, line, item, quantity, unit_price, total; rows whose bidder is "BoQ" are the BoQ
-  json  {"boq": [{line, item, quantity}], "bids": [{bidder, lines: [{line, unit_price, quantity, total, item}]}]}
+is, never interpreted. Spreadsheets use the column headings of a PPRA (Kenya) price schedule; HEADINGS lists the
+ones accepted for each field. The three forms of the same package:
+  xlsx  a sheet named "BoQ" (Item No, Description, Unit, Quantity, and optionally Budget per unit) and one sheet per
+        bidder, named after the bidder (Item No, Unit Price, and optionally Description, Unit, Quantity, Total Price,
+        Country of origin)
+  csv   one file with a Bidder column and the same headings; rows whose bidder is "BoQ" are the BoQ
+  json  {"boq": [{line, item, unit, quantity, budget}],
+         "bids": [{bidder, lines: [{line, unit_price, item, unit, quantity, total, country_of_origin}]}]}
 The agent builds one price band per distinct item, then code compares every bidder's price with it and checks the
 bid files. Bidders are never totalled, ranked or recommended.
 """
@@ -24,15 +27,37 @@ from pathlib import Path
 import jsonschema
 from openpyxl import load_workbook
 
-from fairprice import agent, report
+from fairprice import agent, report, server
 from fairprice.db import get_run, start_run
 
 MIN_IDENTICAL = 2  # ponytail: fixed threshold for the identical-prices pattern; tune with committee feedback
 SCHEMA = json.loads(Path(__file__).with_name("bid_package.schema.json").read_text())
-BOQ_COLUMNS = ("line", "item", "quantity")
-BID_COLUMNS = ("line", "unit_price", "quantity", "total", "item")
-CSV_COLUMNS = ("bidder", "line", "item", "quantity", "unit_price", "total")
-NUMERIC = {"quantity", "unit_price", "total"}
+BOQ_COLUMNS = ("line", "item", "unit", "quantity", "budget")
+BID_COLUMNS = ("line", "item", "unit", "quantity", "unit_price", "total", "country_of_origin")
+CSV_COLUMNS = ("bidder", *dict.fromkeys(BOQ_COLUMNS + BID_COLUMNS))
+NUMERIC = {"quantity", "unit_price", "total", "budget"}
+HEADINGS = {  # field: the spreadsheet headings for it (PPRA price schedules), compared after plain()
+    "bidder": ("Bidder", "Tenderer"),
+    "line": ("Item No", "Item No.", "Item Number"),
+    "item": ("Description", "Description of Goods"),
+    "unit": ("Unit", "Unit of Issue", "Unit of Measure"),
+    "quantity": ("Quantity", "Qty"),
+    "unit_price": ("Unit Price", "Rate", "Unit Rate"),
+    "total": ("Total Price", "Total Amount", "Total"),
+    "country_of_origin": ("Country of Origin",),
+    "budget": ("Budget per unit", "Budget unit price"),
+}
+
+
+def plain(heading):
+    """A heading without case, punctuation at the end, notes in brackets or a currency: "Rate in KES (VAT
+    inclusive)" -> "rate"."""
+    h = re.sub(r"\(.*?\)", " ", str(heading).lower())
+    h = re.sub(r"\bin [a-z]{3}\b", " ", h)
+    return " ".join(h.split()).rstrip(".:")
+
+
+FIELD = {plain(h): field for field, hs in HEADINGS.items() for h in hs}
 NUMBER = re.compile(r"^-?(\d+|\d{1,3}(,\d{3})+)(\.\d+)?$")  # 2500000, 2,500,000 or 2500000.50; nothing else
 
 
@@ -65,19 +90,23 @@ def records(rows, allowed, required, label, problems):
     if not rows:
         problems.append(f"{label}: no rows")
         return []
-    header = [str(c).strip().lower() if c not in (None, "") else "" for c in rows[0]]
-    if unknown := [h for h in header if h and h not in allowed]:
-        problems.append(f"{label}, row 1: unknown column(s) {', '.join(unknown)}; the columns are {', '.join(allowed)}")
+    written = [str(c).strip() if c not in (None, "") else "" for c in rows[0]]
+    header = [FIELD.get(plain(h), "?") if h else "" for h in written]
+    if unknown := [w for w, h in zip(written, header) if h not in allowed and h]:
+        problems.append(f"{label}, row 1: unknown column(s) {', '.join(unknown)}; the columns are "
+                        f"{', '.join(HEADINGS[c][0] for c in allowed)}")
+    if twice := sorted({h for h in header if h and h != "?" and header.count(h) > 1}):
+        problems.append(f"{label}, row 1: more than one column for {', '.join(HEADINGS[c][0] for c in twice)}")
     if missing := [c for c in required if c not in header]:
-        problems.append(f"{label}, row 1: missing column(s) {', '.join(missing)}")
-    if unknown or missing:
+        problems.append(f"{label}, row 1: missing column(s) {', '.join(HEADINGS[c][0] for c in missing)}")
+    if unknown or missing or twice:
         return []
     out = []
     for n, r in enumerate(rows[1:], start=2):
         where = f"{label}, row {n}"
         if any(v not in (None, "") for h, v in zip(header, r) if not h) or len(r) > len(header):
             problems.append(f"{where}: a value in a column with no name")
-        values = {h: cell(v, f"{where}, {h}", problems, h in NUMERIC) for h, v in zip(header, r) if h}
+        values = {h: cell(v, f"{where}, {w}", problems, h in NUMERIC) for w, h, v in zip(written, header, r) if h}
         out.append((where, {k: v for k, v in values.items() if v is not None}))
     return out
 
@@ -91,7 +120,7 @@ def read_xlsx(path, problems):
     for name, rows in sheets.items():
         label = f"sheet “{name}”"
         if name.strip().lower() == "boq":
-            for w, r in records(rows, BOQ_COLUMNS, BOQ_COLUMNS, label, problems):
+            for w, r in records(rows, BOQ_COLUMNS, ("line", "item", "quantity"), label, problems):
                 where[("boq", len(package["boq"]))] = w
                 package["boq"].append(r)
         else:
@@ -113,7 +142,7 @@ def read_csv(path, problems):
             problems.append(f"{w}: no bidder (write BoQ for bill-of-quantities rows)")
         elif bidder.lower() == "boq":
             if extra := sorted(set(r) - set(BOQ_COLUMNS)):
-                problems.append(f"{w}: a BoQ row has no {', '.join(extra)}")
+                problems.append(f"{w}: a BoQ row has no {', '.join(HEADINGS[c][0] for c in extra)}")
             where[("boq", len(package["boq"]))] = w
             package["boq"].append({k: v for k, v in r.items() if k in BOQ_COLUMNS})
         else:
@@ -192,8 +221,8 @@ def load(path):
 def unpack(package, where=None):
     """(boq rows, {bidder: rows}) for the checks and the agent; each row carries where it is in the file."""
     where = where or {}
-    boq = [{"where": locate(["boq", i], where), "line": r["line"], "item": r["item"], "quantity": r["quantity"]}
-           for i, r in enumerate(package["boq"])]
+    boq = [{"where": locate(["boq", i], where), "line": r["line"], "item": r["item"], "quantity": r["quantity"],
+            "unit": r.get("unit"), "budget": r.get("budget")} for i, r in enumerate(package["boq"])]
     bidders = {bid["bidder"]: [{"where": locate(["bids", j, "lines", k], where), "line": r["line"],
                                 "item": r.get("item", ""), "quantity": r.get("quantity"),
                                 "unit_price": r["unit_price"], "total": r.get("total")}
@@ -218,7 +247,8 @@ def describe(path, boq, bidders):
 
 def package_lines(boq, bidders):
     """One entry per BoQ line, with every bidder's quoted unit price."""
-    lines = {r["line"]: {"line": r["line"], "item": r["item"], "quantity": r["quantity"]} for r in boq}
+    lines = {r["line"]: {"line": r["line"], "item": r["item"], "quantity": r["quantity"],
+                         **({"budget": r["budget"]} if r.get("budget") is not None else {})} for r in boq}
     for name, rows in bidders.items():
         for r in rows:
             lines[r["line"]].setdefault("prices", {})[name] = r["unit_price"]
@@ -297,7 +327,9 @@ async def run(args):
     lines = package_lines(boq, bidders)
     checks = file_checks(boq, bidders)  # with the file's sheet and row for each problem
     names = list(bidders)
-    base = {"currency": args.currency.upper(), "year": args.year, "country": args.country.upper()}
+    base = server.review_request(args.currency, args.year, args.country)
+    if base is None:
+        raise SystemExit(server.NOT_LOADED.format(args.country.upper()))
     run_id = args.resume if args.resume and get_run(args.resume) else start_run(
         "package", Path(args.sheet).name, base, lines, names, checks)
     print(f"Review {run_id} | model {agent.MODEL} | {len(lines)} lines, {len(bidders)} bidders")

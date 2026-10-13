@@ -20,12 +20,13 @@ The model judges; code counts. Every number in a report comes from a tool output
 
 ### Bid packages (`--package`)
 
-`batch.py` reads a bid package (xlsx, csv or json) into one form and checks it against `bid_package.schema.json` and the rules the schema cannot express (unique BoQ lines and bidders, every bid line in the BoQ). A package that fails is refused with each problem's location; nothing is interpreted. Each row keeps its location (sheet and row, csv row, or JSON path) so findings can cite it. The whole package is one run, and each BoQ line is a line of that run. It runs the same graph once per distinct item, paused after Recheck, so it reuses the same evidence and the same evals. Each line's steps are recorded as they happen, so an interrupted package resumes (`--resume <run id>`) from the lines that finished. One failed line is reported and does not stop the batch.
+`batch.py` reads a bid package (xlsx, csv or json) into one form and checks it against `bid_package.schema.json`. Spreadsheet columns are those of a PPRA (Kenya) price schedule; a fixed table of headings maps each to one field ("Rate in KES (VAT inclusive)" is the unit price), and anything else is refused. It checks the rules the schema cannot express (unique BoQ lines and bidders, every bid line in the BoQ). A package that fails is refused with each problem's location; nothing is interpreted. Each row keeps its location (sheet and row, csv row, or JSON path) so findings can cite it. The whole package is one run, and each BoQ line is a line of that run. It runs the same graph once per distinct item, paused after Recheck, so it reuses the same evidence and the same evals. Each line's steps are recorded as they happen, so an interrupted package resumes (`--resume <run id>`) from the lines that finished. One failed line is reported and does not stop the batch.
 
-Code then does three things:
+Code then does four things:
 
 - compares every bidder's unit price with that item's band;
-- checks the bid files: arithmetic errors, missing lines, quantities that differ from the BoQ, and identical prices across bidders;
+- checks the bid files: arithmetic errors, missing lines, quantities that differ from the BoQ, and identical prices across bidders. Each finding states what PPRA's standard tender document for goods says about it (ITT 28.2, 29.3, 30.2); the committee decides;
+- shows each quote against the line's budget, if the BoQ has one;
 - builds one draft report for the package.
 
 There is one approval gate for the whole package, and `revise` can redo chosen lines. On approval, `write_price_review` writes it as for a single item. The output never totals or ranks bidders. The Analyst is shown the median quoted price, not any one bid, so no single bidder steers which records it picks.
