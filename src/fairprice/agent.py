@@ -8,6 +8,7 @@ import argparse
 import asyncio
 import contextlib
 import datetime as dt
+import importlib.util
 import json
 import os
 import re
@@ -441,8 +442,85 @@ def ollama_url():
     return url if "://" in url else f"http://{url}"
 
 
+def model_url():
+    """FAIRPRICE_MODEL_URL: your own OpenAI-compatible server, for FAIRPRICE_MODEL=openai:<name>
+    (LM Studio, llama.cpp's llama-server, mlx_lm.server, Jan, LocalAI, vLLM, SGLang, TGI, NIM; e.g. http://localhost:1234/v1)."""
+    return os.environ.get("FAIRPRICE_MODEL_URL", "").strip().rstrip("/")
+
+
+def model_settings(model_name):
+    """Arguments for init_chat_model: temperature 0, a 4,096-token output cap and a 10-minute timeout on every route."""
+    kwargs = {"temperature": 0}
+    if model_name.startswith("ollama:"):
+        # Thinking at temperature 0 can loop for an hour on Qwen3; cap output so a run always ends.
+        kwargs.update(num_ctx=16384, num_predict=4096, reasoning=False, base_url=ollama_url(),
+                      client_kwargs={"timeout": 600})  # a dropped connection fails the run instead of hanging it
+    elif model_name.startswith("openai:"):  # the context window is a server setting on this route (see README)
+        kwargs.update(base_url=model_url(), api_key=os.environ.get("FAIRPRICE_MODEL_API_KEY") or "not-needed",
+                      max_tokens=4096, timeout=600, max_retries=1)
+    return kwargs
+
+
+TOOL_FLAGS = ("Turn tool calling on: for vLLM start it with --enable-auto-tool-choice --tool-call-parser <the model's "
+              "parser>; for llama.cpp add --jinja; in LM Studio choose a model with tool use; mlx_lm.server and Ollama "
+              "need a model whose chat template supports tools.")
+PING = {"type": "function", "function": {"name": "ping", "description": "Answer a ping.",
+                                         "parameters": {"type": "object", "properties": {}}}}
+
+
+def calls_tools(model):
+    """One short request with a dummy tool: '' if the model called it, or why not."""
+    try:
+        reply = model.bind_tools([PING]).invoke("Call the ping tool now.")
+    except Exception as e:
+        return f"the test request failed ({e!r})"
+    return "" if getattr(reply, "tool_calls", None) else "it answered in text instead of calling a tool"
+
+
+CONTEXT_FLAGS = ("Set the server's context window to at least 16,384 tokens: Ollama `OLLAMA_CONTEXT_LENGTH=16384` "
+                 "(or num_ctx in a Modelfile), llama.cpp `-c 16384`, vLLM `--max-model-len 16384`, LM Studio's "
+                 "context-length setting.")
+
+
+def context_problem(model, tokens=7000):
+    """'' if the server reads a long prompt whole, or what it did instead. A server that silently cuts the
+    conversation makes the agent lose its own search results and repeat itself."""
+    try:
+        reply = model.invoke("word " * tokens + "\nReply with the single word OK.")
+    except Exception as e:
+        return f"the long test request failed ({e!r})"
+    read = (getattr(reply, "usage_metadata", None) or {}).get("input_tokens", 0)
+    return "" if read >= tokens * 0.9 else f"it read only {read:,} of about {tokens:,} tokens"
+
+
+def check_server(name):
+    """An OpenAI-compatible server: set, installed, reachable, serving the model, and calling tools."""
+    url = model_url()
+    if not url:
+        return ["FAIRPRICE_MODEL=openai:… needs FAIRPRICE_MODEL_URL, the address of your own OpenAI-compatible server, "
+                "e.g. http://localhost:1234/v1 for LM Studio. FairPrice does not send procurement data to hosted APIs."]
+    if importlib.util.find_spec("langchain_openai") is None:
+        return ["Run `uv sync --extra openai-compatible` to use an OpenAI-compatible server."]
+    key = os.environ.get("FAIRPRICE_MODEL_API_KEY")
+    req = urllib.request.Request(f"{url}/models", headers={"Authorization": f"Bearer {key}"} if key else {})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            have = {m["id"] for m in json.load(r).get("data", [])}
+    except (OSError, ValueError) as e:
+        return [f"No OpenAI-compatible server at {url} ({e}). Start it (LM Studio, llama-server, mlx_lm.server, "
+                "vLLM, ...) or correct FAIRPRICE_MODEL_URL."]
+    if name not in have:
+        return [f"The server at {url} has no model {name!r}. It has: {', '.join(sorted(have)) or 'none'}. "
+                "Set FAIRPRICE_MODEL=openai:<one of those>."]
+    if why := calls_tools(init_chat_model(f"openai:{name}", **model_settings(f"openai:{name}"))):
+        return [f"The model {name!r} at {url} cannot be used: {why}. FairPrice's agent works by calling tools. {TOOL_FLAGS}"]
+    return []
+
+
 def check_model(model_name=MODEL):
     """What would stop a run, each with how to fix it; empty when the model is ready."""
+    if model_name.startswith("openai:"):
+        return check_server(model_name.removeprefix("openai:"))
     if not model_name.startswith("ollama:"):
         return []  # other providers report their own errors
     name, url = model_name.removeprefix("ollama:"), ollama_url()
@@ -468,8 +546,12 @@ def check_setup():
         print(f"{'✓' if good else '✗' if good is False else '•'} {text}" + (f"\n    {fix}" if fix else ""))
 
     problems = check_model(MODEL)
-    show(not problems, f"Model {MODEL} at {ollama_url()}" if MODEL.startswith("ollama:") else f"Model {MODEL}",
-         problems[0] if problems else "")
+    if not problems and MODEL.startswith("openai:"):  # only here: the long test request costs some seconds
+        short = context_problem(init_chat_model(MODEL, **model_settings(MODEL)))
+        problems = [f"The server cuts long conversations: {short}. {CONTEXT_FLAGS}"] if short else []
+    where = (ollama_url() if MODEL.startswith("ollama:") else (model_url() or "(FAIRPRICE_MODEL_URL not set)")
+             if MODEL.startswith("openai:") else "")
+    show(not problems, f"Model {MODEL}" + (f" at {where}" if where else ""), problems[0] if problems else "")
     if Path(DB).exists():
         with duckdb.connect(DB, read_only=True) as con:
             records, countries = con.execute("SELECT count(*), string_agg(DISTINCT country, ', ' ORDER BY country) FROM lines").fetchone()
@@ -539,12 +621,7 @@ async def session(model_name=MODEL):
     borrowed_tools = await client.get_tools(server_name="duckdb")
     if problems := check_model(model_name):
         raise SystemExit("\n".join(problems))
-    kwargs = {"temperature": 0}
-    if model_name.startswith("ollama:"):
-        # Thinking at temperature 0 can loop for an hour on Qwen3; cap output so a run always ends.
-        kwargs.update(num_ctx=16384, num_predict=4096, reasoning=False, base_url=ollama_url(),
-                      client_kwargs={"timeout": 600})  # a dropped connection fails the run instead of hanging it
-    model = init_chat_model(model_name, **kwargs)
+    model = init_chat_model(model_name, **model_settings(model_name))
     (ROOT / "data").mkdir(exist_ok=True)  # the database may be configured elsewhere; run state always lives here
     async with AsyncSqliteSaver.from_conn_string(str(ROOT / "data" / "runs.sqlite")) as saver:
         yield build_graph(own_tools, borrowed_tools, model, saver), {t.name: t for t in own_tools}

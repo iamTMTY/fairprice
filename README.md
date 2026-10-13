@@ -61,6 +61,32 @@ On that machine, start Ollama so other computers can reach it (`OLLAMA_HOST=0.0.
 
 **Another model.** Set `FAIRPRICE_MODEL`, for example `FAIRPRICE_MODEL=ollama:qwen3:8b` (after `ollama pull qwen3:8b`). The evals in EVALS.md were measured with `gemma4`; other models will behave differently.
 
+**Other ways to run an open-weights model.** Instead of Ollama, FairPrice can use any server on your own computer or network that offers an OpenAI-compatible API: LM Studio, llama.cpp's `llama-server`, Apple's `mlx_lm.server`, Jan, LocalAI, vLLM, SGLang, Hugging Face TGI or NVIDIA NIM.
+
+```bash
+uv sync --extra openai-compatible                       # once
+FAIRPRICE_MODEL=openai:<the model name the server uses>
+FAIRPRICE_MODEL_URL=http://localhost:1234/v1             # the server's address (this one is LM Studio's default)
+FAIRPRICE_MODEL_API_KEY=...                              # only if the server was started with a key
+```
+
+Three things to set on the server itself:
+
+- **Tool calling must be on.** FairPrice's agent works by calling tools. vLLM needs `--enable-auto-tool-choice --tool-call-parser <parser for the model>`; llama.cpp needs `--jinja`; in LM Studio, pick a model marked for tool use.
+- **A context window of at least 16,000 tokens.** With Ollama, FairPrice sets this itself; on these servers it is a server option (for example `-c 16384` for llama.cpp, `--max-model-len 16384` for vLLM, the context-length setting in LM Studio).
+- **Thinking mode off**, for models that have one, where the server allows it.
+
+`uv run fairprice --check` (and every run) checks that the server is reachable, serves that model, and actually calls tools: it sends one short test request and, if the model answers in text instead, says which setting to change. FairPrice refuses `openai:` models without `FAIRPRICE_MODEL_URL`, so it never sends procurement data to a hosted API by default.
+
+`--check` also sends one long test prompt to see whether the server reads it whole; a server that silently cuts long conversations makes the agent lose its own search results and repeat the same search.
+
+**What we tested.** We ran this route against Ollama's own OpenAI-compatible endpoint (`FAIRPRICE_MODEL_URL=http://localhost:11434/v1`), which serves the same Gemma 4:
+
+- With Ollama's default context window, the server cut each conversation to about 800 tokens, and Gemma repeated the same search 15 times without ever checking a price. That is why `--check` now tests the context window.
+- With a 16,384-token window (a Modelfile with `PARAMETER num_ctx 16384`), the run worked: it searched, built a band and reached the approval gate in 5 model calls. But this route cannot switch Gemma's thinking off, so it wrote about 6,900 output tokens instead of about 1,000 and took 6 minutes instead of under 2.
+
+The evals in EVALS.md were all run on the native Ollama route, not this one. Run `--check` and a short eval (`uv run fairprice-evals --cases hilux-above,no-benchmark --repeats 1`) before relying on a new server.
+
 ### 3. Get the code
 
 ```bash
@@ -210,6 +236,7 @@ Put settings in a `.env` file next to `pyproject.toml` (copy `.env.example`, whi
 | `FAIRPRICE_OPEN_DRAFT` | `0` | Set to `1` to open the draft report automatically in Excel or Numbers. |
 | `OLLAMA_HOST` | `http://localhost:11434` | Where Ollama runs, if not on this computer. |
 | `FAIRPRICE_MODEL` | `ollama:gemma4` | The model, as `provider:model`. |
+| `FAIRPRICE_MODEL_URL`, `FAIRPRICE_MODEL_API_KEY` | none | Your OpenAI-compatible server, for `FAIRPRICE_MODEL=openai:<name>` (see step 2). |
 | `FAIRPRICE_PRICE_PER_MILLION_INPUT_TOKENS`, `…_OUTPUT_TOKENS`, `FAIRPRICE_PRICE_CURRENCY` | `0`, `0`, `USD` | Prices for working out API fees per run, if you use a paid provider. |
 
 With S3 storage, the draft and approved reports are shown as download links that work for one hour.

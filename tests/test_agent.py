@@ -258,7 +258,7 @@ def test_ollama_url_and_model_checks(monkeypatch):
     assert agent.ollama_url() == "http://gpu-server:11434"
     monkeypatch.setenv("OLLAMA_HOST", "https://ollama.example.org/")
     assert agent.ollama_url() == "https://ollama.example.org"
-    assert agent.check_model("openai:gpt-x") == []  # other providers report their own errors
+    assert agent.check_model("anthropic:x") == []  # other providers report their own errors
 
     class Reply:
         def __init__(self, body):
@@ -319,3 +319,106 @@ def test_usage_counts_calls_tokens_time_and_fees(monkeypatch):
     monkeypatch.setenv("FAIRPRICE_PRICE_PER_MILLION_OUTPUT_TOKENS", "10")
     assert usage.summary()["api_fees"] == 0.01
     assert "3 model calls, 3,000 input and 400 output tokens" in usage.line() and "USD 0.01." in usage.line()
+
+
+class Reply:
+    """A minimal HTTP response for urllib.request.urlopen."""
+
+    def __init__(self, body):
+        self.body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read(self, *a):
+        return self.body
+
+
+def test_openai_compatible_route_settings(monkeypatch):
+    monkeypatch.setenv("FAIRPRICE_MODEL_URL", "http://localhost:1234/v1/")
+    settings = agent.model_settings("openai:gemma-4")
+    assert settings["base_url"] == "http://localhost:1234/v1" and settings["max_tokens"] == 4096
+    assert settings["timeout"] == 600 and settings["api_key"] == "not-needed" and settings["temperature"] == 0
+    monkeypatch.setenv("FAIRPRICE_MODEL_API_KEY", "secret")
+    assert agent.model_settings("openai:gemma-4")["api_key"] == "secret"
+    assert agent.model_settings("anthropic:x") == {"temperature": 0}
+
+
+def test_openai_compatible_server_checks(monkeypatch):
+    monkeypatch.delenv("FAIRPRICE_MODEL_URL", raising=False)
+    assert "needs FAIRPRICE_MODEL_URL" in agent.check_model("openai:gemma-4")[0]
+    monkeypatch.setenv("FAIRPRICE_MODEL_URL", "http://localhost:1234/v1")
+    real_find = agent.importlib.util.find_spec
+    monkeypatch.setattr(agent.importlib.util, "find_spec", lambda name: None)
+    assert "uv sync --extra openai-compatible" in agent.check_model("openai:gemma-4")[0]
+    monkeypatch.setattr(agent.importlib.util, "find_spec", real_find)
+
+    def refused(req, timeout):
+        raise OSError("connection refused")
+    monkeypatch.setattr(agent.urllib.request, "urlopen", refused)
+    assert "No OpenAI-compatible server at http://localhost:1234/v1" in agent.check_model("openai:gemma-4")[0]
+    seen = []
+
+    def models(req, timeout):
+        seen.append(req.headers.get("Authorization"))
+        return Reply(b'{"data": [{"id": "gemma-4"}, {"id": "qwen3"}]}')
+    monkeypatch.setattr(agent.urllib.request, "urlopen", models)
+    monkeypatch.setenv("FAIRPRICE_MODEL_API_KEY", "k")
+    assert "It has: gemma-4, qwen3" in agent.check_model("openai:llama")[0] and seen[-1] == "Bearer k"
+    monkeypatch.setattr(agent, "calls_tools", lambda model: "it answered in text instead of calling a tool")
+    problem = agent.check_model("openai:gemma-4")[0]
+    assert "answered in text" in problem and "--enable-auto-tool-choice" in problem and "--jinja" in problem
+    monkeypatch.setattr(agent, "calls_tools", lambda model: "")
+    assert agent.check_model("openai:gemma-4") == []
+
+
+def test_tool_calling_probe():
+    class Model:
+        def __init__(self, reply):
+            self.reply = reply
+
+        def bind_tools(self, tools):
+            assert tools[0]["function"]["name"] == "ping"
+            return self
+
+        def invoke(self, prompt):
+            if isinstance(self.reply, Exception):
+                raise self.reply
+            return self.reply
+    assert agent.calls_tools(Model(SimpleNamespace(tool_calls=[{"name": "ping"}]))) == ""
+    assert agent.calls_tools(Model(SimpleNamespace(tool_calls=[]))) == "it answered in text instead of calling a tool"
+    assert "the test request failed" in agent.calls_tools(Model(RuntimeError("500")))
+
+
+def test_check_shows_where_the_model_runs(monkeypatch, capsys):
+    monkeypatch.setattr(agent, "check_model", lambda name: [])
+    monkeypatch.setattr(agent, "MODEL", "openai:gemma-4")
+    monkeypatch.delenv("FAIRPRICE_MODEL_URL", raising=False)
+    agent.check_setup()
+    assert "Model openai:gemma-4 at (FAIRPRICE_MODEL_URL not set)" in capsys.readouterr().out
+    monkeypatch.setattr(agent, "MODEL", "anthropic:x")
+    agent.check_setup()
+    assert "✓ Model anthropic:x\n" in capsys.readouterr().out
+
+
+def test_context_window_probe(monkeypatch, capsys):
+    class Model:
+        def __init__(self, reads):
+            self.reads = reads
+
+        def invoke(self, prompt):
+            if isinstance(self.reads, Exception):
+                raise self.reads
+            return SimpleNamespace(usage_metadata={"input_tokens": self.reads})
+    assert agent.context_problem(Model(7005)) == ""
+    assert agent.context_problem(Model(2051)) == "it read only 2,051 of about 7,000 tokens"
+    assert "the long test request failed" in agent.context_problem(Model(RuntimeError("500")))
+    monkeypatch.setattr(agent, "MODEL", "openai:gemma-4")
+    monkeypatch.setenv("FAIRPRICE_MODEL_URL", "http://localhost:1234/v1")
+    monkeypatch.setattr(agent, "check_model", lambda name: [])
+    monkeypatch.setattr(agent, "init_chat_model", lambda name, **kw: Model(2051))
+    assert agent.check_setup() >= 1
+    assert "The server cuts long conversations: it read only 2,051" in capsys.readouterr().out

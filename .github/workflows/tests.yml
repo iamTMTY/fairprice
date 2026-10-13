@@ -17,7 +17,7 @@ jobs:
       - uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
-      - name: Install (Python version from .python-version, packages from uv.lock)
-        run: uv sync --locked --dev
+      - name: Install (Python from .python-version, packages and optional extras from uv.lock)
+        run: uv sync --locked --dev --all-extras
       - name: Run the tests with coverage (fails under 90%)
         run: uv run pytest --cov
