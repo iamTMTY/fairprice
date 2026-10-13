@@ -1,0 +1,23 @@
+# Unit and integration tests on every pull request into main (required before merging) and every push to main.
+# No model or downloads of procurement data are needed: the tests use a synthetic dataset and a scripted model.
+name: tests
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install (Python version from .python-version, packages from uv.lock)
+        run: uv sync --locked --dev
+      - name: Run the tests with coverage (fails under 90%)
+        run: uv run pytest --cov
