@@ -100,7 +100,7 @@ async def run_case(graph, tools, case, model):
         result = judge(case, state)
         final = state.get("final") or {}
         replayed = (server.review(run_id)[2].get("1") or {}).get("final")
-        if "error" not in final and replayed != (final or None):
+        if "accepted" in final and replayed != final:  # a band the tools built (not an unresolved run)
             result["failures"].append("the run's recorded steps do not replay to the same result")
             result["passed"] = False
     except Exception as e:
@@ -196,7 +196,7 @@ def deterministic_checks():
             "write refused for a review that cites no records": server.write_price_review(b, approve(b)),
             "write refused for a review citing a record that does not exist": server.write_price_review(c, approve(c)),
             "write refused for a review that does not exist": server.write_price_review("../pyproject.toml", "x"),
-            "check refused for records the review's searches did not find":
+            "check refused when none of its records came from the review's searches":
                 server.check_price_comparability(a, [KNOWN_RECORD + 1]),
             "search refused for a review that does not exist": server.find_comparables("nope", ["laptop"]),
         }
@@ -207,6 +207,7 @@ def deterministic_checks():
         db.decide(asked["request"], True, "A. Officer")
         discarded = server.write_price_review(a, asked["request"])
         replay = server.review(d)[2]["1"]["final"] == server.check_price_comparability(d, [KNOWN_RECORD])
+        mixed = server.check_price_comparability(d, [KNOWN_RECORD, KNOWN_RECORD + 1])
     results = [{"case": "write without a person's approval only drafts and records a request", "detail": asked,
                 "passed": asked.get("status") == "needs_approval" and "fairprice --approve" in asked.get("message", "")}]
     results += [{"case": name, "passed": "error" in out, "detail": out} for name, out in checks.items()]
@@ -216,6 +217,9 @@ def deterministic_checks():
                     "detail": discarded})
     results.append({"case": "a review rebuilt from its recorded steps matches the tool's answer", "passed": replay,
                     "detail": None})
+    results.append({"case": "a record the review's searches did not find is left out of the band, and named",
+                    "passed": [r["id"] for r in mixed.get("accepted", [])] == [KNOWN_RECORD]
+                    and mixed.get("left_out", {}).get("ids") == [KNOWN_RECORD + 1], "detail": mixed})
     results += [round_trip("file", fmt) for fmt in report.FORMATS] + [round_trip("s3", "xlsx")]
     packages = [batch.load(ROOT / "examples" / f"bid-package.{ext}")[0] for ext in ("xlsx", "csv", "json")]
     results.append({"case": "the xlsx, csv and json templates read to the same bid package",

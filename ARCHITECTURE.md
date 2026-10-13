@@ -43,7 +43,7 @@ There is one approval gate for the whole package, and `revise` can redo chosen l
 
 `start_review` (one item and its quoted price) or `start_package_review` (a bid package as JSON) creates a run and returns its `run_id`. Every other step takes that id and is recorded in the `run_steps` table: the plan, each search (its keywords and the record ids it returned), each price check (the ids judged comparable, the ids rejected with reasons, and the tool's full result), the second check, and the run's cost. A caller passes only judgements, never facts:
 
-- `check_price_comparability(run_id, candidate_ids, rejected)`: the quoted price, currency, year and country come from the run, not the caller. Ids the run's own searches never returned are refused, so every record in a band was found by a recorded search.
+- `check_price_comparability(run_id, candidate_ids, rejected)`: the quoted price, currency, year and country come from the run, not the caller. Ids the run's own searches never returned are left out of the band and named in the answer (`left_out`), so every record in a band was found by a recorded search, and one mistyped id does not throw away the rest (round 9).
 - `challenge_review(run_id, verdict, reason, objections)`: objections must name records in the line's band.
 - `write_price_review(run_id, approval)`: no report body is passed in. The tool rebuilds the report from the run's steps, checks that every cited record exists, and saves a draft. A person's approval is for one **version** of the run (`<run id>@<last step>`): if anything is recorded after the draft, the approval is refused and a new draft is needed.
 

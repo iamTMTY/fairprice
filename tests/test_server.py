@@ -132,8 +132,11 @@ def test_a_review_is_one_run_across_tool_calls():
     found = server.find_comparables(run, ["hilux"])
     assert found["total_matches"] == 11  # only the review's own country: Kenya's Hilux awards are not searched
     good, bundle = ids(HILUX), by_desc("Supply of 2 Toyota Hilux and 1 Toyota Prado")
-    refused = server.check_price_comparability(run, good + [ids("SELECT id FROM lines WHERE country = 'KE'")[0]])
-    assert refused["error"].startswith("Refused: records") and "find_comparables" in refused["error"]
+    kenyan = ids("SELECT id FROM lines WHERE country = 'KE'")[0]
+    refused = server.check_price_comparability(run, [kenyan])
+    assert refused["error"].startswith("Refused: none of the candidate") and str(kenyan) in refused["error"]
+    mixed = server.check_price_comparability(run, good + [kenyan], {str(kenyan): "x"})
+    assert mixed["left_out"]["ids"] == [kenyan] and kenyan not in [r["id"] for r in mixed["accepted"] + mixed["excluded"]]
     band = server.check_price_comparability(run, good, {f"L{bundle}": "bundle"})
     assert band["assessment"] == "within_band" and band["price_under_review"] == 95e6 and band["year"] == 2025
     assert "error" in server.challenge_review(run, "MAYBE", "x")

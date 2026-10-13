@@ -267,7 +267,8 @@ def check_price_comparability(run_id: str, candidate_ids: list[int], rejected: d
     model, a bundle, a lot price). They are left out of the band; the reasons appear in the report.
     The price, currency and year come from the review. The tool also excludes records with invalid dates,
     test entries, multi-item contracts, no unit price and duplicates, adjusts every price for inflation and
-    currency, and needs at least 5 records for a band. Records not found by this review's searches are refused.
+    currency, and needs at least 5 records for a band. Records not returned by this review's searches are left
+    out of the band and listed in left_out.
     """
     run, entry, error = run_or_error(run_id, line)
     if error:
@@ -277,11 +278,16 @@ def check_price_comparability(run_id: str, candidate_ids: list[int], rejected: d
     rejected = {record_id(k): v for k, v in (rejected or {}).items()}
     candidates = [record_id(i) for i in candidate_ids]
     found = {i for step in steps(run_id, str(line), "search") for i in step.data["ids"]}
-    if strangers := sorted((set(candidates) | set(rejected)) - found):
-        return {"error": f"Refused: records {strangers} were not returned by this review's searches. "
-                         "Search for them first with find_comparables."}
+    strangers = sorted((set(candidates) | set(rejected)) - found)  # a mistyped id must not sink the other judgements
+    candidates = [i for i in candidates if i in found]
+    rejected = {k: v for k, v in rejected.items() if k in found}
+    if not candidates:
+        return {"error": f"Refused: none of the candidate records were returned by this review's searches"
+                         f"{f' (not found by them: {strangers})' if strangers else ''}. Search with find_comparables first."}
     result = price_band(quoted(entry), run.request["currency"], run.request["year"], candidates,
                         {str(k): v for k, v in rejected.items()})
+    if strangers and "error" not in result:
+        result["left_out"] = {"ids": strangers, "reason": "not returned by this review's searches; check the ids"}
     if "error" not in result:
         add_step(run_id, str(line), "check", {"candidate_ids": candidates,
                                               "rejected": {str(k): v for k, v in rejected.items()}, "result": result})
