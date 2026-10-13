@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/iamTMTY/fairprice/blob/main/src/fairprice/bid_package.schema.json",
+  "title": "FairPrice bid package",
+  "description": "A procurement's bill of quantities (BoQ) and every bidder's price schedule. xlsx and csv packages are read into this shape and checked against it; a package that does not match is refused, never interpreted.",
+  "type": "object",
+  "required": ["boq", "bids"],
+  "additionalProperties": false,
+  "properties": {
+    "boq": {
+      "description": "The procuring entity's bill of quantities: what is being bought.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["line", "item", "quantity"],
+        "additionalProperties": false,
+        "properties": {
+          "line": {"description": "Line number, unique in the BoQ. Bids are matched to the BoQ by it.", "type": ["string", "integer"], "minLength": 1},
+          "item": {"description": "What is being bought, as the agent should search for it.", "type": "string", "minLength": 1},
+          "quantity": {"description": "How many are required.", "type": "number", "exclusiveMinimum": 0}
+        }
+      }
+    },
+    "bids": {
+      "description": "One entry per bidder.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["bidder", "lines"],
+        "additionalProperties": false,
+        "properties": {
+          "bidder": {"description": "The bidder's name, unique in the package.", "type": "string", "minLength": 1},
+          "lines": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["line", "unit_price"],
+              "additionalProperties": false,
+              "properties": {
+                "line": {"description": "A line number from the BoQ.", "type": ["string", "integer"], "minLength": 1},
+                "unit_price": {"description": "Quoted price per item.", "type": "number", "minimum": 0},
+                "quantity": {"description": "Quantity quoted for, if stated.", "type": "number", "exclusiveMinimum": 0},
+                "total": {"description": "Line total as written in the bid, if stated.", "type": "number", "minimum": 0},
+                "item": {"description": "The bidder's own description, if any.", "type": "string"}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

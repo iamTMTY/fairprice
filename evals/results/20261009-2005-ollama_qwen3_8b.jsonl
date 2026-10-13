@@ -1,0 +1,3 @@
+{"case": "hilux-within", "run_id": "eval-hilux-within-cc20dc", "seconds": 178.6, "assessment": "above_band", "n": 8, "median": 48356065.38, "challenge": "DISPUTED", "failures": ["assessment above_band, expected within_band"], "passed": false}
+{"case": "hilux-within", "run_id": "eval-hilux-within-a4a967", "seconds": 169.7, "assessment": "above_band", "n": 8, "median": 48356065.38, "challenge": "DISPUTED", "failures": ["assessment above_band, expected within_band"], "passed": false}
+{"case": "hilux-within", "run_id": "eval-hilux-within-8415a1", "seconds": 181.7, "assessment": "above_band", "n": 8, "median": 48356065.38, "challenge": "DISPUTED", "failures": ["assessment above_band, expected within_band"], "passed": false}

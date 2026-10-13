@@ -1,0 +1,84 @@
+{
+  "boq": [
+    {
+      "line": "1",
+      "item": "Toyota Hilux double cabin pickup",
+      "quantity": 2
+    },
+    {
+      "line": "2",
+      "item": "Laptop computer",
+      "quantity": 20
+    },
+    {
+      "line": "3",
+      "item": "Motorcycle 125cc",
+      "quantity": 10
+    }
+  ],
+  "bids": [
+    {
+      "bidder": "Bidder A",
+      "lines": [
+        {
+          "line": "1",
+          "unit_price": 95000000,
+          "quantity": 2,
+          "total": 190000000
+        },
+        {
+          "line": "2",
+          "unit_price": 2500000,
+          "quantity": 20,
+          "total": 50000000
+        },
+        {
+          "line": "3",
+          "unit_price": 1300000,
+          "quantity": 10,
+          "total": 13000000
+        }
+      ]
+    },
+    {
+      "bidder": "Bidder B",
+      "lines": [
+        {
+          "line": "1",
+          "unit_price": 300000000,
+          "quantity": 2,
+          "total": 600000000
+        },
+        {
+          "line": "2",
+          "unit_price": 2600000,
+          "quantity": 20,
+          "total": 56000000
+        },
+        {
+          "line": "3",
+          "unit_price": 1250000,
+          "quantity": 10,
+          "total": 12500000
+        }
+      ]
+    },
+    {
+      "bidder": "Bidder C",
+      "lines": [
+        {
+          "line": "1",
+          "unit_price": 95000000,
+          "quantity": 1,
+          "total": 95000000
+        },
+        {
+          "line": "2",
+          "unit_price": 2500000,
+          "quantity": 20,
+          "total": 50000000
+        }
+      ]
+    }
+  ]
+}

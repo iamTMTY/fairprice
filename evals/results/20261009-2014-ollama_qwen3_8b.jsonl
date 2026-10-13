@@ -1,0 +1,2 @@
+{"case": "hilux-within", "run_id": "eval-hilux-within-8d3b04", "seconds": 600.8, "assessment": "within_band", "n": 18, "median": 89328580.75, "challenge": "DISPUTED", "failures": ["trap records in band: [111921, 113240, 113245]"], "passed": false}
+{"case": "hilux-above", "run_id": "eval-hilux-above-98dc7f", "seconds": 832.0, "assessment": "above_band", "n": 20, "median": 89328580.75, "challenge": "DISPUTED", "failures": ["trap records in band: [111921, 113240, 113245, 123662]"], "passed": false}

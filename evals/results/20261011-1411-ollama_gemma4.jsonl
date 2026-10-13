@@ -1,0 +1,5 @@
+{"case": "hilux-within", "run_id": "eval-hilux-within-b9129e", "seconds": 124.7, "assessment": "within_band", "n": 12, "median": 88632142.1, "challenge": "STANDS", "failures": [], "passed": true}
+{"case": "hilux-within", "run_id": "eval-hilux-within-c9b4a1", "seconds": 182.4, "assessment": "within_band", "n": 12, "median": 88632142.1, "challenge": "STANDS", "failures": [], "passed": true}
+{"case": "hilux-above", "run_id": "eval-hilux-above-f8119e", "seconds": 336.2, "assessment": "above_band", "n": 13, "median": 98345804.07, "challenge": "DISPUTED", "failures": ["trap records in band: [111921]"], "passed": false}
+{"case": "hilux-above", "run_id": "eval-hilux-above-a7b265", "seconds": 444.0, "assessment": "above_band", "n": 13, "median": 98345804.07, "challenge": "DISPUTED", "failures": ["trap records in band: [111921]"], "passed": false}
+{"case": "laptop-above", "run_id": "eval-laptop-above-4f96d3", "seconds": 167.5, "assessment": "above_band", "n": 15, "median": 2020704.15, "challenge": "DISPUTED", "failures": [], "passed": true}

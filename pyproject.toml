@@ -1,0 +1,57 @@
+[project]
+name = "fairprice"
+version = "0.1.0"
+description = "Agent that prepares a sourced price-reasonableness file for public tender committees"
+authors = [
+    { name = "Temitayo Salaudeen", email = "salaudeen.t@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "aiosqlite>=0.22.1",
+    "duckdb>=1.5.6",
+    "jsonschema>=4.26.0",
+    "langchain>=1.4.4",
+    "langchain-mcp-adapters>=0.3.2",
+    "langchain-ollama>=1.1.0",
+    "langgraph>=1.2.14",
+    "langgraph-checkpoint-sqlite>=3.1.1",
+    "mcp>=1.30.0",
+    "openpyxl>=3.1.5",
+    "python-dotenv>=1.2.4",
+    "sqlalchemy>=2.1.4",
+]
+
+[project.scripts]
+fairprice = "fairprice.agent:main"
+fairprice-ingest = "fairprice.ingest:main"
+fairprice-evals = "fairprice.evals:main"
+
+[project.optional-dependencies]
+s3 = [
+    "boto3>=1.43.111",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.15,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "moto[s3]>=5.2.3",
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.coverage.run]
+source = ["fairprice"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+fail_under = 90
+exclude_also = ["if __name__ == .__main__.:"]

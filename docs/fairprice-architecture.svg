@@ -1,0 +1,162 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="960" viewBox="0 0 1400 960" font-family="Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#333"/>
+    </marker>
+    <marker id="g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#c0392b"/>
+    </marker>
+    <style>
+      .t{font-size:15px;fill:#222}
+      .s{font-size:13px;fill:#444}
+      .h{font-size:16px;font-weight:700;fill:#111}
+      .m{font-family:Menlo,monospace;font-size:13px;fill:#222}
+      .ln{stroke:#333;stroke-width:1.6;fill:none}
+      .dash{stroke:#888;stroke-width:1.4;fill:none;stroke-dasharray:6 5}
+      .lbl{font-size:12px;fill:#555}
+    </style>
+  </defs>
+  <rect width="1400" height="960" fill="#fff"/>
+  <text x="40" y="44" font-size="26" font-weight="700" fill="#111">FairPrice: architecture and data flow</text>
+  <text x="40" y="70" class="s">Prepares a sourced price-reasonableness file for a tender evaluation committee. It never awards a tender.</text>
+
+  <!-- Human: analyst -->
+  <rect x="40" y="110" width="260" height="90" rx="10" fill="#fdf2e9" stroke="#d46222" stroke-width="1.6"/>
+  <text x="60" y="140" class="h">Procurement analyst</text>
+  <text x="60" y="162" class="s">Enters item, quantity, unit</text>
+  <text x="60" y="180" class="s">and the price under review (CLI)</text>
+
+  <!-- LLM -->
+  <rect x="40" y="290" width="260" height="130" rx="10" fill="#eef3fb" stroke="#3b6fb6" stroke-width="1.6"/>
+  <text x="60" y="320" class="h">LLMs</text>
+  <text x="60" y="344" class="t">Gemma 4 (open weights)</text>
+  <text x="60" y="363" class="s">served locally by Ollama (default)</text>
+  <text x="60" y="390" class="t">Qwen3 8B, or any other model</text>
+  <text x="60" y="408" class="s">swapped in for comparison runs</text>
+
+  <!-- Human: officer -->
+  <rect x="40" y="520" width="260" height="100" rx="10" fill="#fdecea" stroke="#c0392b" stroke-width="1.6"/>
+  <text x="60" y="550" class="h">Approving officer (named)</text>
+  <text x="60" y="572" class="s">Approves, edits or rejects the draft,</text>
+  <text x="60" y="590" class="s">or requests further investigation</text>
+  <text x="60" y="608" class="s">Committee decides the award</text>
+
+  <!-- Orchestrator -->
+  <rect x="360" y="100" width="540" height="560" rx="12" fill="#f7f7f7" stroke="#333" stroke-width="1.8"/>
+  <text x="380" y="130" class="h">LangGraph orchestrator  (MCP client)</text>
+  <text x="380" y="150" class="s">State graph · SQLite checkpointer holds run state across the approval pause</text>
+
+  <g>
+    <rect x="390" y="170" width="480" height="50" rx="8" fill="#fff" stroke="#555"/>
+    <text x="406" y="191" class="t" font-weight="700">1  Plan</text>
+    <text x="406" y="210" class="s">Analyst agent: normalise the item, choose search strategy</text>
+
+    <rect x="390" y="240" width="480" height="66" rx="8" fill="#fff" stroke="#555"/>
+    <text x="406" y="261" class="t" font-weight="700">2  Find and check comparables</text>
+    <text x="406" y="280" class="s">Rejects mismatched unit, pack size, year or currency;</text>
+    <text x="406" y="297" class="s">widens or re-runs the search when too few remain</text>
+    <path class="ln" d="M870,258 C905,258 905,290 870,290" marker-end="url(#a)"/>
+    <text x="874" y="312" class="lbl">loop</text>
+
+    <rect x="390" y="326" width="480" height="66" rx="8" fill="#fff" stroke="#555"/>
+    <text x="406" y="347" class="t" font-weight="700">3  Challenger agent</text>
+    <text x="406" y="366" class="s">Tries to disprove every price flag with its own queries;</text>
+    <text x="406" y="383" class="s">only flags that survive, with sources, move on</text>
+
+    <rect x="390" y="412" width="480" height="50" rx="8" fill="#fff" stroke="#555"/>
+    <text x="406" y="433" class="t" font-weight="700">4  Draft report</text>
+    <text x="406" y="452" class="s">Every finding cites its OCDS release ID</text>
+
+    <rect x="390" y="482" width="480" height="50" rx="8" fill="#fdecea" stroke="#c0392b" stroke-width="1.6"/>
+    <text x="406" y="503" class="t" font-weight="700">5  Human approval gate (interrupt)</text>
+    <text x="406" y="522" class="s">Run pauses; nothing is saved without a named approver</text>
+
+    <rect x="390" y="552" width="480" height="50" rx="8" fill="#fff" stroke="#555"/>
+    <text x="406" y="573" class="t" font-weight="700">6  Save report</text>
+    <text x="406" y="592" class="s">Calls write_price_review with the approver's name</text>
+
+    <path class="ln" d="M630,220 V240" marker-end="url(#a)"/>
+    <path class="ln" d="M630,306 V326" marker-end="url(#a)"/>
+    <path class="ln" d="M630,392 V412" marker-end="url(#a)"/>
+    <path class="ln" d="M630,462 V482" marker-end="url(#a)"/>
+    <path class="ln" d="M630,532 V552" marker-end="url(#a)"/>
+  </g>
+  <path d="M390,492 H373 V195 H390" stroke="#c0392b" stroke-width="1.6" fill="none" stroke-dasharray="6 4" marker-end="url(#g)"/>
+  <text transform="translate(369,450) rotate(-90)" font-size="11" fill="#c0392b">further investigation</text>
+  <text x="380" y="626" class="s">Stops when findings are supported, unresolved, or the step budget runs out</text>
+  <text x="380" y="646" class="s">Every tool call is logged: tool, inputs, outputs, timestamp, approver</text>
+
+  <!-- Human / LLM links -->
+  <path class="ln" d="M300,155 H360" marker-end="url(#a)"/>
+  <text x="306" y="146" class="lbl">request</text>
+  <path class="ln" d="M300,355 H360" marker-start="url(#a)" marker-end="url(#a)"/>
+  <text x="306" y="346" class="lbl">prompts</text>
+  <text x="306" y="374" class="lbl">tool calls</text>
+  <path d="M300,560 H340 V524 H390" stroke="#c0392b" stroke-width="1.8" fill="none" marker-start="url(#g)" marker-end="url(#g)"/>
+  <text x="303" y="578" class="lbl" fill="#c0392b">approve</text>
+
+  <!-- MCP servers -->
+  <rect x="960" y="100" width="400" height="290" rx="12" fill="#eef8f0" stroke="#2e8b57" stroke-width="1.8"/>
+  <text x="980" y="130" class="h">fairprice-mcp  (built by us)</text>
+  <text x="980" y="150" class="s">Python MCP SDK · stdio transport</text>
+  <text x="980" y="180" class="t" font-weight="700">Tools</text>
+  <text x="990" y="203" class="m">find_comparables</text>
+  <text x="990" y="221" class="s">search past awards across countries</text>
+  <text x="990" y="246" class="m">check_price_comparability</text>
+  <text x="990" y="264" class="s">units, pack size, CPI and FX adjustment</text>
+  <text x="990" y="289" class="m">write_price_review</text>
+  <text x="990" y="307" class="s">saves report + audit entry (gated write)</text>
+  <text x="980" y="337" class="t" font-weight="700">Resources</text>
+  <text x="990" y="360" class="m">ocds://release/{id}</text>
+  <text x="990" y="378" class="s">original record behind each citation</text>
+
+  <rect x="960" y="420" width="400" height="110" rx="12" fill="#f3eefb" stroke="#6b4bb6" stroke-width="1.8"/>
+  <text x="980" y="450" class="h">DuckDB MCP server  (borrowed)</text>
+  <text x="980" y="470" class="s">Existing open-source server, read-only mode</text>
+  <text x="990" y="496" class="m">execute_query</text>
+  <text x="1110" y="496" class="s">ad-hoc SQL for the Challenger</text>
+  <text x="990" y="516" class="s">to test flags independently</text>
+
+  <path class="ln" d="M900,245 H960" marker-start="url(#a)" marker-end="url(#a)"/>
+  <text x="906" y="236" class="lbl">MCP</text>
+  <path class="ln" d="M900,470 H960" marker-start="url(#a)" marker-end="url(#a)"/>
+  <text x="906" y="461" class="lbl">MCP</text>
+
+  <!-- Data layer -->
+  <rect x="360" y="720" width="360" height="110" rx="10" fill="#fffbe6" stroke="#b7950b" stroke-width="1.6"/>
+  <text x="380" y="750" class="h">DuckDB file (local)</text>
+  <text x="380" y="772" class="s">OCDS awards: KE, RW, TZ, NG, ZA, LR, GH, ZM, UG</text>
+  <text x="380" y="792" class="s">CPI and exchange-rate reference tables</text>
+  <text x="380" y="812" class="s">Data stays on the machine</text>
+
+  <rect x="760" y="720" width="300" height="110" rx="10" fill="#fffbe6" stroke="#b7950b" stroke-width="1.6"/>
+  <text x="780" y="750" class="h">Outputs (local)</text>
+  <text x="780" y="772" class="s">reports/  approved price reviews</text>
+  <text x="780" y="792" class="s">audit.jsonl  every tool call</text>
+  <text x="780" y="812" class="s">with inputs, outputs, time, approver</text>
+
+  <rect x="40" y="700" width="260" height="70" rx="10" fill="#fff" stroke="#888" stroke-dasharray="5 4"/>
+  <text x="60" y="728" class="h">OCDS bulk downloads</text>
+  <text x="60" y="750" class="s">public data from 9 portals</text>
+  <rect x="40" y="790" width="260" height="70" rx="10" fill="#fff" stroke="#888" stroke-dasharray="5 4"/>
+  <text x="60" y="818" class="h">World Bank API</text>
+  <text x="60" y="840" class="s">CPI and exchange rates</text>
+  <path class="dash" d="M300,735 H360" marker-end="url(#a)"/>
+  <path class="dash" d="M300,825 H330 V790 H360" marker-end="url(#a)"/>
+  <text x="40" y="890" class="lbl">External APIs: fetched once by an ingest script, then the agent runs offline</text>
+  <text x="40" y="930" class="s" font-style="italic">Proposed design; not an implementation claim.</text>
+
+  <path class="ln" d="M960,365 H930 V690 H600 V720" marker-end="url(#a)"/>
+  <text x="936" y="684" class="lbl">reads</text>
+  <path class="ln" d="M1100,530 V705 H680 V720" marker-end="url(#a)"/>
+  <text x="1108" y="620" class="lbl">reads (read-only)</text>
+  <path class="ln" d="M1360,300 H1385 V775 H1060" marker-end="url(#a)"/>
+  <text x="1180" y="768" class="lbl">writes after approval</text>
+
+  <!-- legend -->
+  <rect x="1100" y="860" width="260" height="70" rx="8" fill="#fff" stroke="#ddd"/>
+  <rect x="1115" y="875" width="14" height="14" fill="#fdecea" stroke="#c0392b"/>
+  <text x="1137" y="887" class="lbl">Human in the loop</text>
+  <line x1="1115" y1="910" x2="1135" y2="910" class="dash"/>
+  <text x="1143" y="914" class="lbl">One-off ingest, not at run time</text>
+</svg>
