@@ -141,7 +141,8 @@ def test_add_country_requests_are_described_for_the_approver(web):
         db.CALLER.reset(token)
 
 
-def test_fairprices_own_review_runs_in_the_background(monkeypatch):
+def test_fairprices_own_review_runs_in_the_background(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "ROOT", tmp_path)  # the review's log goes to <ROOT>/data/reviews
     run = server.start_review("Toyota Hilux double cabin pickup", 95e6, year=2025)["run_id"]
     assert server.review_status(run)["state"] == "not started"
     assert "No review" in server.review_with_fairprice("nope")["error"] and "No review" in server.review_status("nope")["error"]

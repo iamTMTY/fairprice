@@ -12,3 +12,4 @@ data/ingest*
 .DS_Store
 .coverage
 .pytest_cache/
+data/reviews/
