@@ -3,13 +3,13 @@
 import csv
 import io
 import json
-from unittest import mock
+from pathlib import Path
 
 import pytest
 from openpyxl import load_workbook
 
 from conftest import ids
-from fairprice import agent, db, report, server
+from fairprice import db, report, server
 from fairprice.storage import storage
 
 HILUX = "SELECT id FROM lines WHERE description LIKE 'Supply of Toyota Hilux double cabin pickup unit%' ORDER BY id"
@@ -139,7 +139,8 @@ def test_three_file_formats(package):
     wb = load_workbook(io.BytesIO(xlsx["R.xlsx"]))
     assert wb.sheetnames == ["Prices", "Sources"] and wb["Prices"].oddHeader.center.text == report.DRAFT_STATUS
     assert wb["Prices"]["H3"].fill.fgColor.rgb.endswith("F8D7D7")  # Bidder B, well above: red
-    assert wb["Prices"].cell(wb["Prices"].max_row, 1).value == report.DRAFT_STATUS
+    assert wb["Prices"].cell(wb["Prices"].max_row - 1, 1).value == report.DRAFT_STATUS
+    assert wb["Prices"].cell(wb["Prices"].max_row, 1).value == report.NOTICE and data["report"]["notice"] == report.NOTICE
     out = report.files(data, "R", "csv")
     assert set(out) == {"R-prices.csv", "R-sources.csv"} and out["R-prices.csv"].startswith(b"\xef\xbb\xbf")
     rows = list(csv.DictReader(io.StringIO(out["R-prices.csv"].decode("utf-8-sig"))))
@@ -149,58 +150,28 @@ def test_three_file_formats(package):
     assert report.files(empty, "E", "csv")["E-sources.csv"].decode("utf-8-sig").startswith("Status")
 
 
-def test_draft_approve_retrieve_and_reject(monkeypatch):
+def test_write_retrieve_in_each_format(monkeypatch):
     for fmt in report.FORMATS:
         monkeypatch.setenv("FAIRPRICE_REPORT_FORMAT", fmt)
         run = package_run("Bid Package!")
-        asked = server.write_price_review(run)  # no person, no approval: a draft and a request
-        assert asked["status"] == "needs_approval" and asked["draft"] == f"DRAFT-bid-package-{run}"
-        assert storage().load(asked["files"][0].rsplit("/", 1)[-1])
-        db.decide(asked["request"], True, "Ada Obi")
-        saved = server.write_price_review(run, asked["request"])
-        assert saved["saved"].endswith(f"bid-package-{run}") and saved["sources"] >= 8
+        saved = server.write_price_review(run, "Ada Obi")  # the person who approved it, by name
+        assert saved["saved"].endswith(f"bid-package-{run}") and saved["approved_by"] == "Ada Obi"
+        assert saved["past_purchases_compared"] >= 7 and saved["left_out_with_reasons"] >= 1
         got = server.get_price_review(run)
         assert got["report"]["approved_by"] == "Ada Obi" and got["files"]
         assert got["lines"][0]["second_check"]["verdict"] == "STANDS"
         assert any(r["run_id"] == run for r in server.get_price_review()["reports"])
-        with pytest.raises(Exception):
-            storage().load(asked["files"][0].rsplit("/", 1)[-1])
-    run = package_run("rejected")
-    asked = server.write_price_review(run)
-    server.discard_review(run)  # the person rejected it
-    db.decide(asked["request"], True, "Ada")  # too late: the request was cancelled with its draft
-    assert "not an unused human approval" in server.write_price_review(run, asked["request"])["error"]
+        assert storage().load(Path(got["files"][0]).name)
     assert "No approved report" in server.get_price_review("nothing")["error"]
-    assert "No review" in server.write_price_review("nothing")["error"]
+    assert "No review" in server.write_price_review("nothing", "Ada")["error"]
 
 
-def test_approval_refusals():
+def test_write_refusals():
     run = package_run("refusals")
-    assert "not an unused human approval" in server.write_price_review(run, "made-up")["error"]
-    other = db.grant("write_price_review", f"{package_run('other')}@1", "Ada")
-    assert "not an unused human approval" in server.write_price_review(run, other)["error"]
-    first = server.write_price_review(run)["request"]
-    second = server.write_price_review(run)["request"]  # a new draft cancels the old one and its request
-    db.decide(first, True, "Ada")
-    assert "not an unused human approval" in server.write_price_review(run, first)["error"]
-    db.decide(second, True, "Ada")
-    checked(run, "2", ids("SELECT id FROM lines WHERE description LIKE 'Laptop computer%'"))  # the review changed
-    assert "not an unused human approval" in server.write_price_review(run, second)["error"]
+    assert "full name" in server.write_price_review(run, "  ")["error"]
+    assert "format is one of" in server.write_price_review(run, "Ada", "pdf")["error"]
     empty = db.start_run("item", "nothing yet", BASE, [{"line": "1", "item": "x", "quantity": None, "prices": {"P": 1}}], ["P"])
-    assert "nothing to report" in server.write_price_review(empty)["error"]
-
-
-def test_opening_the_draft_only_when_asked(monkeypatch):
-    with mock.patch("subprocess.run") as run:
-        agent.open_draft("R.xlsx")
-        run.assert_not_called()
-        monkeypatch.setenv("FAIRPRICE_OPEN_DRAFT", "1")
-        agent.open_draft("R.xlsx")
-        run.assert_called_once()
-    monkeypatch.setattr("sys.platform", "win32")
-    with mock.patch("os.startfile", create=True) as start:
-        agent.open_draft("R.xlsx")
-    start.assert_called_once()
+    assert "nothing to report" in server.write_price_review(empty, "Ada")["error"]
 
 
 def test_budget_columns_when_the_boq_has_budgets():

@@ -5,7 +5,7 @@ import os
 from unittest import mock
 
 from conftest import ids, offline_registry
-from fairprice import db, server
+from fairprice import server
 
 HILUX = "SELECT id FROM lines WHERE description LIKE 'Supply of Toyota Hilux double cabin pickup unit%' ORDER BY id"
 
@@ -98,11 +98,7 @@ def test_list_countries_and_add_country():
         proc = mock.Mock(pid=os.getpid())  # a process that is running
         with mock.patch("subprocess.Popen", return_value=proc) as popen, \
                 mock.patch.object(server, "ROOT", server.Path(os.environ["FAIRPRICE_REPORTS"]).parent):
-            asked = server.add_country("rw")
-            assert asked["status"] == "needs_approval" and "fairprice --approve" in asked["message"]
-            popen.assert_not_called()  # nothing happens without a person
-            assert "not an unused human approval" in server.add_country("rw", "made-up")["error"]
-            started = server.add_country("rw", db.grant("add_country", "RW", "Ada"))
+            started = server.add_country("rw")
             assert started["started"] == "RW" and popen.call_args.args[0][-2:] == ["--add", "RW"]
             assert "already running" in server.add_country("ng")["error"]
         from fairprice import ingest

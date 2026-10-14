@@ -379,7 +379,7 @@ async def run(args):
         states = await analyse(graph, lines, base, run_id, usage=usage)
         attempt = 0
         while True:
-            decision = await agent.gate(run_id, tools, report.summary(lines, states, names, checks, base), usage,
+            decision = await agent.gate(run_id, report.summary(lines, states, names, checks, base), usage,
                                         ask_lines=which_lines)
             if decision["action"] != "revise":
                 break
@@ -387,7 +387,7 @@ async def run(args):
             states |= await analyse(graph, lines, base, run_id, decision["feedback"], attempt, decision["lines"], usage)
         saved = None
         if decision["action"] == "approve":
-            result = await tools["write_price_review"].ainvoke({"run_id": run_id, "approval": decision["approval"]})
+            result = await tools["write_price_review"].ainvoke({"run_id": run_id, "approved_by": decision["name"]})
             saved = agent.tool_text(result)
-        print(saved or "Not saved: the reviewer rejected the draft.")
+        print(saved or "Not saved: the reviewer rejected it.")
         agent.audit(run_id, event="run_finished", saved=saved, cost=usage.summary())

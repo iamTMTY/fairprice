@@ -16,7 +16,9 @@ from openpyxl.styles import Alignment, Font, PatternFill
 
 from fairprice.server import assess, rows
 
-DRAFT_STATUS = "DRAFT – not approved"  # until approved; then "Approved by <name> on <date>"
+DRAFT_STATUS = "Not approved"  # a report built but not written; a written one says "Approved by <name> on <date>"
+NOTICE = ("Evidence prepared by FairPrice for the evaluation committee. It does not rank bidders or decide anything; "
+          "the committee decides.")
 
 SYMBOL = {"NGN": "₦", "KES": "KSh "}
 STATUS = {  # code: (label, icon, fill colour)
@@ -144,9 +146,9 @@ def check_text(c, cur):
     return f"{where}: {c['check']}."
 
 
-def draft_name(item, run_id):
+def file_name(item, run_id):
     """The report's name in the reports table; its files add an extension (and -prices/-sources for csv)."""
-    return f"DRAFT-{re.sub(r'[^a-z0-9]+', '-', item.lower()).strip('-')[:40]}-{run_id}"
+    return f"{re.sub(r'[^a-z0-9]+', '-', item.lower()).strip('-')[:40]}-{run_id}"
 
 
 def summary(lines, states, bidders, checks, base):
@@ -209,7 +211,7 @@ def build(title, lines, states, bidders, checks, base, run_id, model=""):
                              if k in ("verdict", "reason", "applied")} or None,
             "objections": {str(k): v for k, v in (((states.get(e["line"]) or {}).get("challenge") or {}).get("remove") or {}).items()}}
            for e in lines]
-    return {"report": {"title": title, "status": "draft", "approved_by": None, "approved_at": None,
+    return {"report": {"title": title, "notice": NOTICE, "status": "draft", "approved_by": None, "approved_at": None,
                        "prepared_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
                        "prepared_by": f"FairPrice ({model})" if model else "FairPrice", "run_id": run_id,
                        "currency": cur, "prices_in_year": year, "country": base["country"],
@@ -311,6 +313,7 @@ def workbook(data, prices, srcs):
     table(ws, prices, (6, 30, 11, 18, 16, 18, 11, 24) + ((16, 11) if budgets else ()) + (11, 16, 60), status,
           {f"Quoted price per item ({cur})": money_fmt, f"Typical past price ({cur}, {year} money)": money_fmt,
            "Times the typical price": '0.00"×"', f"Budget per item ({cur})": money_fmt, "Times the budget": '0.00"×"'})
+    ws.cell(len(prices) + 4, 1, NOTICE)
     fills = {label: colour for label, _, colour in STATUS.values() if colour}
     for row, r in enumerate(data["prices"], 2):
         if fill := fills.get(r["result"]):

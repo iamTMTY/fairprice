@@ -1,4 +1,4 @@
-"""The SQL database: runs and their steps, the audit log, the reports and human approvals. Any SQLAlchemy URL works (FAIRPRICE_SQL_URL), e.g.
+"""The SQL database: runs and their steps, the audit log, the reports and access keys. Any SQLAlchemy URL works (FAIRPRICE_SQL_URL), e.g.
 postgresql+psycopg://user@host/db with that database's driver installed. Default: data/runs.sqlite.
 """
 
@@ -16,7 +16,7 @@ from sqlalchemy import JSON, Column, DateTime, Integer, MetaData, String, Table,
 
 # Who is calling: the organisation and role of the access key on this request (a web deployment), or None for
 # this computer's own CLI and tools (organisation "local", or FAIRPRICE_ORG for a review run on an
-# organisation's behalf). Every run, report, approval and audit row belongs to one organisation, and a caller
+# organisation's behalf). Every run, report and audit row belongs to one organisation, and a caller
 # sees only its own.
 CALLER = contextvars.ContextVar("caller", default=None)
 
@@ -53,16 +53,6 @@ REPORTS = Table("reports", META,
                 Column("data", JSON, nullable=False),  # the report itself: summary, prices, sources
                 org_column())
 
-APPROVALS = Table("approvals", META,
-                  Column("id", String(32), primary_key=True),
-                  Column("action", String(32), nullable=False),  # write_price_review or add_country
-                  Column("target", String(200), nullable=False),  # the report name, or the country code
-                  Column("status", String(16), nullable=False),  # pending, approved, rejected or used
-                  Column("approved_by", String(200)),
-                  Column("created_at", DateTime(timezone=True), nullable=False),
-                  Column("decided_at", DateTime(timezone=True)),
-                  org_column())
-
 RUNS = Table("runs", META,
              Column("id", String(32), primary_key=True),
              Column("kind", String(16), nullable=False),  # item (one price) or package (a BoQ and its bids)
@@ -84,8 +74,8 @@ KEYS = Table("access_keys", META,  # for a web deployment: who may call the tool
              Column("id", String(16), primary_key=True),  # the public part of the key
              Column("hash", String(64), nullable=False),  # sha256 of the secret part; the secret is never stored
              Column("org", String(64), nullable=False),
-             Column("role", String(16), nullable=False),  # app (calls tools) or approver (a named person)
-             Column("name", String(200), nullable=False),  # the app, or the approving officer's full name
+             Column("role", String(16), nullable=False),  # "app": calls the tools
+             Column("name", String(200), nullable=False),  # the app's name, shown in the audit log
              Column("created_at", DateTime(timezone=True), nullable=False),
              Column("revoked_at", DateTime(timezone=True)))
 
@@ -118,6 +108,10 @@ def _engine(address):
     return made
 
 
+def now():
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
 def audit(run_id, **event):
     """Append one row to the audit log, under the caller's organisation. A row without an `event` is a tool call."""
     with engine().begin() as db:
@@ -125,10 +119,8 @@ def audit(run_id, **event):
                                              detail=event, org=org()))
 
 
-def add_key(org_name, role, name):
+def add_key(org_name, name, role="app"):
     """A new access key; the only time its secret is shown. Store it like a password."""
-    if role not in ("app", "approver"):
-        raise ValueError("role is app or approver")
     key_id, secret = secrets.token_hex(6), secrets.token_urlsafe(24)
     with engine().begin() as db:
         db.execute(KEYS.insert().values(id=key_id, hash=hashlib.sha256(secret.encode()).hexdigest(), org=org_name,
@@ -136,7 +128,7 @@ def add_key(org_name, role, name):
     return f"fp_{key_id}_{secret}"
 
 
-def check_key(key, role):
+def check_key(key, role="app"):
     """The caller ({org, role, name, key}) for a valid, unrevoked key of this role, else None."""
     parts = str(key).split("_", 2)
     if len(parts) != 3 or parts[0] != "fp":
@@ -152,60 +144,6 @@ def revoke_key(key_id):
     with engine().begin() as db:
         return db.execute(KEYS.update().where(KEYS.c.id == key_id, KEYS.c.revoked_at.is_(None))
                           .values(revoked_at=now())).rowcount
-
-
-# Human approvals. Only a person grants one: at the agent's approval menu, or with `fairprice --approve <id>`.
-# An MCP tool that changes something needs an approved, unused approval for exactly its action and target.
-
-def now():
-    return datetime.datetime.now(datetime.timezone.utc)
-
-
-def request_approval(action, target):
-    """A pending request for a person to decide; the same pending request is reused if asked again."""
-    with engine().begin() as db:
-        found = db.execute(select(APPROVALS.c.id).where(APPROVALS.c.action == action, APPROVALS.c.target == target,
-                                                        APPROVALS.c.status == "pending", APPROVALS.c.org == org())).first()
-        if found:
-            return found.id
-        new = secrets.token_hex(8)
-        db.execute(APPROVALS.insert().values(id=new, action=action, target=target, status="pending", created_at=now(),
-                                             org=org()))
-        return new
-
-
-def grant(action, target, approved_by):
-    """An approval given by a person in the terminal (the agent's approval menu)."""
-    new = secrets.token_hex(8)
-    with engine().begin() as db:
-        db.execute(APPROVALS.insert().values(id=new, action=action, target=target, status="approved",
-                                             approved_by=approved_by, created_at=now(), decided_at=now(), org=org()))
-    return new
-
-
-def decide(approval_id, approved, approved_by=None):
-    """A person's decision on a pending request."""
-    with engine().begin() as db:
-        return db.execute(APPROVALS.update().where(APPROVALS.c.id == approval_id, APPROVALS.c.status == "pending",
-                                                   APPROVALS.c.org == org()).values(
-            status="approved" if approved else "rejected", approved_by=approved_by, decided_at=now())).rowcount
-
-
-def use_approval(approval_id, action, target):
-    """Spend an approval: returns its row if it is approved, unused and for exactly this action and target."""
-    with engine().begin() as db:
-        row = db.execute(select(APPROVALS).where(APPROVALS.c.id == approval_id, APPROVALS.c.action == action,
-                                                 APPROVALS.c.target == target, APPROVALS.c.status == "approved",
-                                                 APPROVALS.c.org == org())).first()
-        if row:
-            db.execute(APPROVALS.update().where(APPROVALS.c.id == approval_id).values(status="used"))
-        return row
-
-
-def approvals(status="pending"):
-    with engine().connect() as db:
-        return db.execute(select(APPROVALS).where(APPROVALS.c.status == status, APPROVALS.c.org == org())
-                          .order_by(APPROVALS.c.created_at)).all()
 
 
 # Runs: one review across many MCP calls. Every step's real data comes from our code and is stored here,
@@ -238,11 +176,3 @@ def steps(run_id, line=None, kind=None):
         query = query.where(RUN_STEPS.c.kind == kind)
     with engine().connect() as db:
         return db.execute(query.order_by(RUN_STEPS.c.id)).all()
-
-
-def supersede(action, prefix):
-    """Cancel pending requests for an older version of the same run (their draft no longer exists)."""
-    with engine().begin() as db:
-        db.execute(APPROVALS.update().where(APPROVALS.c.action == action, APPROVALS.c.target.like(f"{prefix}%"),
-                                            APPROVALS.c.status == "pending", APPROVALS.c.org == org())
-                   .values(status="superseded", decided_at=now()))

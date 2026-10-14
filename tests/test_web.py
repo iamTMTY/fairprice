@@ -1,5 +1,5 @@
-"""FairPrice as a web server: access keys, organisations, the audit log, uploads, the approval page and API, signed
-report links, the background review and the CLI as a thin client. Over HTTP with Starlette's test client."""
+"""FairPrice as a web server: access keys, organisations, the audit log, uploads, signed report links, the
+background review and the CLI as a thin client. Over HTTP with Starlette's test client."""
 
 import argparse
 import asyncio
@@ -26,8 +26,7 @@ def web():
     """One HTTP app for the module (its session manager can start once), with keys for two organisations."""
     global APP
     APP = APP or server.mcp.streamable_http_app()
-    keys = {"app": db.add_key("acme", "app", "Acme portal"), "approver": db.add_key("acme", "approver", "Ada Obi"),
-            "other": db.add_key("other", "app", "Other org")}
+    keys = {"app": db.add_key("acme", "Acme portal"), "other": db.add_key("other", "Other org")}
     with TestClient(APP, base_url="http://127.0.0.1:8000") as client:
         yield client, keys
 
@@ -51,10 +50,9 @@ def checked_item(client, key):
     return run
 
 
-def test_only_an_apps_key_may_call_the_tools(web):
+def test_every_call_needs_a_key(web):
     client, keys = web
     assert rpc(client, "", "tools/list")[0] == 401
-    assert rpc(client, keys["approver"], "tools/list")[0] == 401  # an approver's key cannot call tools
     assert rpc(client, "fp_nope_nope", "tools/list")[0] == 401
     status, body = rpc(client, keys["app"], "tools/list")
     names = {t["name"] for t in body["result"]["tools"]}
@@ -67,7 +65,7 @@ def test_organisations_see_only_their_own_reviews_and_every_call_is_audited(web)
     client, keys = web
     run = checked_item(client, keys["app"])
     assert "No review" in call(client, keys["other"], "review_status", run_id=run)["error"]
-    assert "No review" in call(client, keys["other"], "write_price_review", run_id=run)["error"]
+    assert "No review" in call(client, keys["other"], "write_price_review", run_id=run, approved_by="X")["error"]
     with db.engine().connect() as conn:
         rows = conn.execute(select(db.AUDIT_LOG).where(db.AUDIT_LOG.c.run_id == run).order_by(db.AUDIT_LOG.c.id)).all()
     assert [(r.org, r.detail["tool"], r.detail["caller"]) for r in rows][:2] == [
@@ -78,39 +76,26 @@ def test_organisations_see_only_their_own_reviews_and_every_call_is_audited(web)
 def test_a_workbook_uploaded_through_mcp_is_read_like_a_file(web):
     client, keys = web
     upload = base64.b64encode((EXAMPLES / "bid-package.xlsx").read_bytes()).decode()
-    started = call(client, keys["app"], "start_package_review", file=upload, filename="tender.xlsx", year=2025)
+    started = call(client, keys["app"], "start_package_review", file=upload, filename="package.xlsx", year=2025)
     assert started["bidders"] == ["Bidder A", "Bidder B", "Bidder C"] and started["bid_file_problems"] == 4
-    run = db.CALLER.set({"org": "acme", "role": "app", "name": "x"})
+    token = db.CALLER.set({"org": "acme", "role": "app", "name": "x"})
     try:
         assert "sheet “Bidder B”" in db.get_run(started["run_id"]).checks[0]["where"]
     finally:
-        db.CALLER.reset(run)
+        db.CALLER.reset(token)
     assert call(client, keys["app"], "start_package_review", file="%%%", filename="x.xlsx")["problems"] == ["file is not base64"]
     assert "Send package" in call(client, keys["app"], "start_package_review")["error"]
     bad = base64.b64encode(b"Bidder,Item No,Price per piece\n").decode()
     assert "unknown column" in call(client, keys["app"], "start_package_review", file=bad, filename="t.csv")["problems"][0]
 
 
-def test_the_approval_api_and_page_take_the_name_from_the_approvers_key(web, monkeypatch):
+def test_a_report_is_written_under_the_name_the_app_sends_and_downloaded_by_link(web, monkeypatch):
     client, keys = web
     monkeypatch.setenv("FAIRPRICE_PUBLIC_URL", "http://127.0.0.1:8000")
     run = checked_item(client, keys["app"])
-    assert "format is one of" in call(client, keys["app"], "write_price_review", run_id=run, format="pdf")["error"]
-    draft = call(client, keys["app"], "write_price_review", run_id=run, format="csv")
-    assert "/approve" in draft["message"] and draft["files"][0].startswith("http://127.0.0.1:8000/reports/DRAFT-")
-    bearer = lambda k: {"Authorization": f"Bearer {k}"}
-    assert client.get("/api/approvals", headers=bearer(keys["app"])).status_code == 401  # an app cannot approve
-    listed = client.get("/api/approvals", headers=bearer(keys["approver"])).json()["requests"]
-    assert any(r["request"] == draft["request"] for r in listed)
-    assert client.post(f"/api/approvals/{draft['request']}", headers=bearer(keys["approver"]),
-                       json={"decision": "maybe"}).status_code == 400
-    page = client.post("/approve", data={"key": keys["approver"], "request": draft["request"]}).text
-    assert "signed in as <b>Ada Obi</b>" in page and "Approve, under my name" in page
-    assert "not a valid approver key" in client.post("/approve", data={"key": keys["app"], "request": "x"}).text
-    assert "No pending request" in client.post("/approve", data={"key": keys["approver"], "request": "x"}).text
-    assert "Your approver key" in client.get("/approve?request=abc").text
-    done = client.post("/approve", data={"key": keys["approver"], "request": draft["request"], "decision": "approve"}).text
-    assert "&quot;approved_by&quot;: &quot;Ada Obi&quot;" in done
+    assert "full name" in call(client, keys["app"], "write_price_review", run_id=run, approved_by="")["error"]
+    saved = call(client, keys["app"], "write_price_review", run_id=run, approved_by="Ada Obi", format="csv")
+    assert saved["approved_by"] == "Ada Obi" and saved["files"][0].startswith("http://127.0.0.1:8000/reports/")
     report = call(client, keys["app"], "get_price_review", run_id=run)
     assert report["report"]["approved_by"] == "Ada Obi"
     link = report["files"][0].removeprefix("http://127.0.0.1:8000")
@@ -118,27 +103,9 @@ def test_the_approval_api_and_page_take_the_name_from_the_approvers_key(web, mon
     assert client.get(link[:-2] + "00").status_code == 403
     assert client.get(link.split("?")[0] + "?expires=1&sig=x").status_code == 403
     expires = int(time.time()) + 60
-    gone = f"/reports/DRAFT-gone-x.csv?expires={expires}&sig={server.sign('DRAFT-gone-x.csv', expires)}"
+    gone = f"/reports/gone-x.csv?expires={expires}&sig={server.sign('gone-x.csv', expires)}"
     assert client.get(gone).status_code == 404
-    rejected = checked_item(client, keys["app"])
-    second = call(client, keys["app"], "write_price_review", run_id=rejected)
-    out = client.post(f"/api/approvals/{second['request']}", headers=bearer(keys["approver"]), json={"decision": "reject"})
-    assert out.json()["message"] == "Rejected; nothing was changed."
     assert client.get("/template.xlsx").content[:2] == b"PK"
-
-
-def test_add_country_requests_are_described_for_the_approver(web):
-    client, keys = web
-    token = db.CALLER.set({"org": "acme", "role": "approver", "name": "Ada Obi"})
-    try:
-        request = db.request_approval("add_country", "RW")
-        assert "Add country RW" in server.pending_request(request)[1]["summary"]
-        gone = db.request_approval("write_price_review", "nothing@1")
-        assert "no longer exists" in server.pending_request(gone)[1]["error"]
-        db.decide(request, False)
-        db.decide(gone, False)
-    finally:
-        db.CALLER.reset(token)
 
 
 def test_fairprices_own_review_runs_in_the_background(monkeypatch, tmp_path):
@@ -157,7 +124,7 @@ def test_fairprices_own_review_runs_in_the_background(monkeypatch, tmp_path):
     monkeypatch.setattr(agent, "session", lambda *a, **k: fake_session(model))
     asyncio.run(agent.review_unattended(run))
     status = server.review_status(run)
-    assert status["state"] == "done" and status["status"] == "needs_approval" and "₦" in status["summary"]
+    assert status["state"] == "done" and "₦" in status["summary"] and "write_price_review" in status["next"]
     assert status["lines_checked"] == "1 of 1"
     with pytest.raises(SystemExit, match="No review"):
         asyncio.run(agent.review_unattended("nope"))
@@ -170,11 +137,11 @@ def test_fairprices_own_review_runs_in_the_background(monkeypatch, tmp_path):
     assert server.review_status(run)["state"] == "failed"
 
 
-def test_the_cli_as_a_thin_client(monkeypatch, capsys, tmp_path):
-    answers = {"start_review": {"run_id": "r1", "lines": [{}]}, "review_with_fairprice": {"started": "r1"},
+def test_the_cli_as_a_thin_client(monkeypatch, capsys, tmp_path, answers):
+    replies = {"start_review": {"run_id": "r1", "lines": [{}]}, "review_with_fairprice": {"started": "r1"},
+               "write_price_review": {"saved": "r1-report", "approved_by": "Ada Obi"},
                "review_status": iter([{"state": "running", "lines_checked": "0 of 1"},
-                                      {"state": "done", "lines_checked": "1 of 1", "summary": "Line 1 ok",
-                                       "files": ["http://x/reports/D.xlsx"], "message": "approve at /approve"}])}
+                                      {"state": "done", "lines_checked": "1 of 1", "summary": "Line 1 ok"}])}
     seen = []
 
     class Tool:
@@ -183,30 +150,36 @@ def test_the_cli_as_a_thin_client(monkeypatch, capsys, tmp_path):
 
         async def ainvoke(self, args):
             seen.append((self.name, args))
-            answer = answers[self.name]
-            return json.dumps(next(answer) if hasattr(answer, "__next__") else answer)
+            reply = replies[self.name]
+            return json.dumps(next(reply) if hasattr(reply, "__next__") else reply)
 
     class Client:
         def __init__(self, servers):
             assert servers["fairprice"]["headers"]["Authorization"] == "Bearer k"
 
         async def get_tools(self):
-            return [Tool(n) for n in answers] + [Tool("start_package_review")]
+            return [Tool(n) for n in replies] + [Tool("start_package_review")]
     monkeypatch.setattr(agent, "MultiServerMCPClient", Client)
     monkeypatch.setattr(agent, "POLL_SECONDS", 0)
     monkeypatch.setenv("FAIRPRICE_SERVER_URL", "http://x/")
     monkeypatch.setenv("FAIRPRICE_API_KEY", "k")
     monkeypatch.setattr("sys.argv", ["fairprice", "laptop", "--unit-price", "5"])
+    answers(["approve", "Ada Obi"])
     agent.main()
     out = capsys.readouterr().out
-    assert "Review r1 on http://x" in out and "1 of 1 lines checked" in out and "approve at /approve" in out
-    answers["start_package_review"] = {"error": "The package does not match", "problems": ["row 2: bad"]}
+    assert "Review r1 on http://x" in out and "1 of 1 lines checked" in out and '"approved_by": "Ada Obi"' in out
+    assert seen[-1] == ("write_price_review", {"run_id": "r1", "approved_by": "Ada Obi"})
+    replies["review_status"] = iter([{"state": "done", "lines_checked": "1 of 1", "summary": "ok"}])
+    answers(["reject"])
+    agent.main()
+    assert "Not saved: the reviewer rejected it." in capsys.readouterr().out
+    replies["start_package_review"] = {"error": "The package does not match", "problems": ["row 2: bad"]}
     (tmp_path / "t.csv").write_text("x")
     with pytest.raises(SystemExit, match="row 2: bad"):
         asyncio.run(agent.remote(argparse.Namespace(sheet=str(tmp_path / "t.csv"), currency=None, year=2025, country="NG")))
     assert seen[-1][1]["file"] == base64.b64encode(b"x").decode()
-    answers["start_review"] = {"run_id": "r2", "lines": [{}]}
-    answers["review_status"] = iter([{"state": "failed", "error": "boom"}])
+    replies["start_review"] = {"run_id": "r2", "lines": [{}]}
+    replies["review_status"] = iter([{"state": "failed", "error": "boom"}])
     with pytest.raises(SystemExit, match="The review failed: boom"):
         asyncio.run(agent.remote(argparse.Namespace(sheet=None, item="x", unit_price=1, currency=None, year=2025,
                                                     country="NG")))
@@ -215,62 +188,16 @@ def test_the_cli_as_a_thin_client(monkeypatch, capsys, tmp_path):
         agent.main()
 
 
-def test_approving_on_a_server_from_the_cli(monkeypatch, capsys, answers):
-    calls = []
-
-    def api(method, url, body=None):
-        calls.append((method, url, body))
-        return {"requests": [{"request": "q1", "summary": "Approve the price review r1", "files": ["http://x/f"]}]} \
-            if method == "GET" else {"approved_by": "Ada Obi"}
-    monkeypatch.setenv("FAIRPRICE_SERVER_URL", "http://x")
-    monkeypatch.setattr(agent, "api", api)
-    agent.approve_request("")
-    assert "q1  Approve the price review r1" in capsys.readouterr().out
-    answers(["approve"])
-    agent.approve_request("q1")
-    assert calls[-1] == ("POST", "http://x/api/approvals/q1", {"decision": "approve"})
-    assert '"approved_by": "Ada Obi"' in capsys.readouterr().out
-    with pytest.raises(SystemExit, match="No pending request"):
-        agent.approve_request("q2")
-
-
-def test_the_approval_api_client(monkeypatch):
-    import urllib.error
-
-    class Reply:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-        def read(self):
-            return b'{"ok": true}'
-    monkeypatch.setenv("FAIRPRICE_APPROVER_KEY", "fp_a_b")
-    seen = []
-    monkeypatch.setattr(agent.urllib.request, "urlopen", lambda req, timeout: seen.append(req) or Reply())
-    assert agent.api("POST", "http://x/api/approvals/q", {"decision": "reject"}) == {"ok": True}
-    assert seen[0].headers["Authorization"] == "Bearer fp_a_b" and json.loads(seen[0].data) == {"decision": "reject"}
-
-    def refused(req, timeout):
-        raise urllib.error.HTTPError(req.full_url, 401, "no", {}, __import__("io").BytesIO(b'{"error": "key"}'))
-    monkeypatch.setattr(agent.urllib.request, "urlopen", refused)
-    with pytest.raises(SystemExit, match="The server refused"):
-        agent.api("GET", "http://x/api/approvals")
-
-
 def test_access_keys_and_the_server_command(capsys):
-    key = db.add_key("acme", "app", "Portal")
+    key = db.add_key("acme", "Portal")
     key_id = key.split("_")[1]
-    assert db.check_key(key, "app")["org"] == "acme" and db.check_key(key, "approver") is None
-    assert db.check_key("nonsense", "app") is None and db.check_key(key[:-3] + "xyz", "app") is None
-    with pytest.raises(ValueError):
-        db.add_key("acme", "admin", "x")
+    assert db.check_key(key)["org"] == "acme" and db.check_key(key, "admin") is None
+    assert db.check_key("nonsense") is None and db.check_key(key[:-3] + "xyz") is None
     server.main(["--revoke-key", key_id])
-    assert "Revoked." in capsys.readouterr().out and db.check_key(key, "app") is None
+    assert "Revoked." in capsys.readouterr().out and db.check_key(key) is None
     server.main(["--revoke-key", key_id])
     assert "No such active key." in capsys.readouterr().out
-    server.main(["--add-key", "acme", "--role", "approver", "--name", "Ada Obi"])
+    server.main(["--add-key", "acme", "--name", "Portal two"])
     assert "Shown once" in capsys.readouterr().out
     with pytest.raises(SystemExit):
         server.main(["--add-key", "acme"])

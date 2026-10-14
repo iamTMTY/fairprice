@@ -146,7 +146,7 @@ def test_full_package_run_with_revise_and_approve(session, answers, capsys, monk
     answers(["reject"])
     asyncio.run(batch.run(args))
     out = capsys.readouterr().out
-    assert "Not saved: the reviewer rejected the draft." in out
+    assert "Not saved: the reviewer rejected it." in out
     run = re.search(r"Review (\w+) \|", out).group(1)
     answers(["reject"])
     asyncio.run(batch.run(argparse.Namespace(**{**vars(args), "resume": run})))

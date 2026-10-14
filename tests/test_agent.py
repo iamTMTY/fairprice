@@ -137,10 +137,10 @@ def test_cli_run_reject_revise_and_approve(session, answers, capsys):
     args = argparse.Namespace(resume=None, **REQ)
     asyncio.run(agent.run(args))
     out = capsys.readouterr().out
-    assert "Draft report (DRAFT-toyota-hilux-double-cabin-pickup-" in out and '"saved"' in out
+    assert report.NOTICE in out and '"approved_by": "Ada Obi"' in out and "toyota-hilux-double-cabin-pickup-" in out
     answers(["reject"])
     asyncio.run(agent.run(args))
-    assert "Not saved: the reviewer rejected the draft." in capsys.readouterr().out
+    assert "Not saved: the reviewer rejected it." in capsys.readouterr().out
 
 
 def test_cli_resume_a_paused_run(session, answers, capsys):
@@ -252,47 +252,6 @@ def test_show_draft_summary_for_a_single_item():
     lines, states, names = report.single(state)
     assert names == ["Price under review"] and lines[0]["prices"] == {"Price under review": REQ["unit_price"]}
     assert conftest.SAVER is not None
-
-
-def test_a_person_decides_requests_from_ai_apps(answers, capsys, monkeypatch):
-    """`fairprice --approve`: list requests, approve a report as a named person, reject an add_country request."""
-    from fairprice import db
-    state = asyncio.run(run_graph(ScriptedModel(keywords={REQ["item"]: ["hilux"]})))[2]
-    run = state["request"]["run_id"]
-    request = server.write_price_review(run)["request"]
-    agent.approve_request("")
-    assert request in capsys.readouterr().out
-    answers(["approve", "Ada Obi"])
-    agent.approve_request(request)
-    out = capsys.readouterr().out
-    assert f"An AI app asks: Approve the price review {run}" in out and '"approved_by": "Ada Obi"' in out
-    assert server.get_price_review(json.loads(out[out.index("{"):])["run_id"])["report"]["approved_by"] == "Ada Obi"
-    country = db.request_approval("add_country", "RW")
-    answers(["reject"])
-    agent.approve_request(country)
-    assert "Rejected; nothing was changed." in capsys.readouterr().out
-    with pytest.raises(SystemExit, match="No pending request"):
-        agent.approve_request(country)
-    gone = db.request_approval("write_price_review", "deleted@1")
-    with pytest.raises(SystemExit, match="no longer exists"):
-        agent.approve_request(gone)
-    country = db.request_approval("add_country", "RW")
-    answers(["approve", "Ada Obi"])
-    with mock.patch.object(server, "add_country", return_value={"started": "RW"}) as add:
-        agent.approve_request(country)
-    assert add.call_args.kwargs == {"approval": country} and "Add country RW" in capsys.readouterr().out
-    db.decide(gone, False)  # the last pending request, settled
-    agent.approve_request("")
-    assert "No requests waiting for approval." in capsys.readouterr().out
-
-
-def test_main_routes_approve(monkeypatch):
-    seen = []
-    monkeypatch.setattr(agent, "approve_request", lambda rid: seen.append(rid))
-    for argv, expected in ((["fairprice", "--approve"], ""), (["fairprice", "--approve", "abc"], "abc")):
-        monkeypatch.setattr("sys.argv", argv)
-        agent.main()
-        assert seen[-1] == expected
 
 
 def test_ollama_url_and_model_checks(monkeypatch):

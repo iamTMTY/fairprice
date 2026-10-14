@@ -1,4 +1,4 @@
-"""FairPrice agent: Analyst -> Challenger -> re-check -> draft -> human approval -> save.
+"""FairPrice agent: Analyst -> Challenger -> re-check -> summary -> a person decides -> save under their name.
 
 Usage:
   uv run fairprice "HP ProBook 440 G8 laptop" --unit-price 1450000 --year 2025
@@ -15,7 +15,6 @@ import re
 import subprocess
 import sys
 import time
-import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import TypedDict
@@ -34,8 +33,8 @@ from langgraph.types import Command, interrupt
 from sqlalchemy import select
 
 from fairprice import ingest, report
-from fairprice.db import AUDIT_LOG, add_step, approvals, audit, decide, engine, get_run
-from fairprice.server import MIN_COMPARABLES, discard_review, record_id
+from fairprice.db import AUDIT_LOG, add_step, audit, engine, get_run
+from fairprice.server import MIN_COMPARABLES, record_id
 from fairprice.storage import storage
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -316,7 +315,7 @@ def build_graph(own_tools, borrowed_tools, model, checkpointer):
         result = await run_tool("check_price_comparability", req).ainvoke({"candidate_ids": ids, "rejected": rejected})
         return {"final": as_json(tool_text(result))}
 
-    async def draft(state: State):
+    async def summary(state: State):
         return {"report": report.summary(*report.single(state), None, state["request"])}
 
     async def approve(state: State):
@@ -328,56 +327,31 @@ def build_graph(own_tools, borrowed_tools, model, checkpointer):
 
     async def save(state: State):
         result = await by_name["write_price_review"].ainvoke(
-            {"run_id": state["request"]["run_id"], "approval": state["decision"]["approval"]})
+            {"run_id": state["request"]["run_id"], "approved_by": state["decision"]["name"]})
         return {"saved": tool_text(result)}
 
     g = StateGraph(State)
     for name, fn in (("analyst", analyst), ("challenger", challenger), ("recheck", recheck),
-                     ("draft", draft), ("approve", approve), ("save", save)):
+                     ("summary", summary), ("approve", approve), ("save", save)):
         g.add_node(name, fn)
     g.add_edge(START, "analyst")
     g.add_edge("analyst", "challenger")
     g.add_edge("challenger", "recheck")
-    g.add_edge("recheck", "draft")
-    g.add_edge("draft", "approve")
+    g.add_edge("recheck", "summary")
+    g.add_edge("summary", "approve")
     g.add_conditional_edges("approve", route, ["save", "analyst", END])
     g.add_edge("save", END)
     return g.compile(checkpointer=checkpointer)
 
 
-def open_draft(where):
-    """Open the draft in Excel or Numbers, only if FAIRPRICE_OPEN_DRAFT=1."""
-    if os.environ.get("FAIRPRICE_OPEN_DRAFT") != "1":
-        return
-    if sys.platform == "win32":
-        os.startfile(where)
-    else:  # a file path, or a download link when reports are kept in S3-compatible storage
-        subprocess.run(["open" if sys.platform == "darwin" else "xdg-open", where], capture_output=True)
-
-
-async def gate(run_id, tools, text, usage, ask_lines=None):
-    """The human approval gate, for single items and packages: write_price_review drafts the report from what the
-    run recorded, a person reads it and decides; approve carries their approval to write_price_review, and reject
-    or revise deletes the draft. Returns the decision."""
+async def gate(run_id, text, usage, ask_lines=None):
+    """The person at the end of a run, for single items and packages: they read the summary and approve (the report
+    is written under their name), revise (questions back to the agent) or reject (nothing is written)."""
     add_step(run_id, "*", "cost", usage.summary())  # the report states what the run cost
-    drafted = as_json(tool_text(await tools["write_price_review"].ainvoke({"run_id": run_id})))
-    print(f"\n{text}\n\n{usage.line()}\n")
-    if "error" in drafted:
-        print(f"No draft: {drafted['error']}\n")
-    else:
-        print(f"Draft report ({drafted['draft']}):\n" + "\n".join(f"  {w}" for w in drafted["files"]) + "\n")
-        open_draft(drafted["files"][0])
-    decision = ask_decision(can_approve="error" not in drafted)
+    print(f"\n{text}\n\n{usage.line()}\n\n{report.NOTICE}\n")
+    decision = ask_decision()
     if decision["action"] == "revise" and ask_lines:
         decision["lines"] = ask_lines()
-    request = drafted.get("request")
-    if decision["action"] == "approve":  # the person at this menu is the approval write_price_review needs
-        decide(request, True, decision["name"])
-        decision["approval"] = request
-    else:
-        if request:
-            decide(request, False)
-        discard_review(run_id)
     audit(run_id, event="human_decision", **decision)
     return decision
 
@@ -427,54 +401,11 @@ def choose(prompt, options):
     return options[i][0]
 
 
-def approve_request(request_id):
-    """A person decides a request an AI app made (write_price_review or add_country without approval). On this
-    computer it decides in the local database; with FAIRPRICE_SERVER_URL, on that server, as the approving officer
-    whose key is FAIRPRICE_APPROVER_KEY (the server takes their name from the key)."""
-    from fairprice import server
-    remote = os.environ.get("FAIRPRICE_SERVER_URL", "").rstrip("/")
-    if remote:
-        call = lambda method, path, body=None: api(method, f"{remote}{path}", body)
-        listed = call("GET", "/api/approvals")["requests"]
-        info = next((r for r in listed if r.get("request") == request_id), None)
-    else:
-        listed = [server.pending_request(r.id)[1] for r in approvals("pending")]
-        info = server.pending_request(request_id)[1] if request_id else None
-    if not request_id:
-        print("\n".join(f"{r.get('request', '?')}  {r.get('summary', r.get('error'))}" for r in listed)
-              or "No requests waiting for approval.")
-        return
-    if not info or "error" in info:
-        raise SystemExit((info or {}).get("error") or f"No pending request {request_id}. Run `fairprice --approve` to list them.")
-    print(f"An AI app asks: {info['summary']}" + (" Files: " + ", ".join(info["files"]) if info.get("files") else ""))
-    action = choose("Decision", [("approve", "carry it out now, under your name"), ("reject", "refuse it")])
-    if remote:
-        print(json.dumps(call("POST", f"/api/approvals/{request_id}", {"decision": action}), indent=2))
-        return
-    name = ""
-    while action == "approve" and not name:
-        name = input("Your full name: ").strip()
-    result = server.decide_request(request_id, action == "approve", name or None)
-    print(json.dumps(result, indent=2, default=str) if action == "approve" else "Rejected; nothing was changed.")
-
-
-def api(method, url, body=None):
-    """A call to a FairPrice server's approval API, as the approving officer whose key is FAIRPRICE_APPROVER_KEY."""
-    req = urllib.request.Request(url, method=method, data=json.dumps(body).encode() if body is not None else None,
-                                 headers={"Authorization": f"Bearer {os.environ.get('FAIRPRICE_APPROVER_KEY', '')}",
-                                          "Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=60) as r:
-            return json.loads(r.read())
-    except urllib.error.HTTPError as e:
-        raise SystemExit(f"The server refused: {e.read().decode(errors='replace')[:300]}")
-
-
-def ask_decision(can_approve=True):
-    """The human gate: approve (with a name), revise (with questions) or reject."""
-    options = [("approve", "stamp the report with your name and keep it")] if can_approve else []
-    action = choose("Decision", options + [("revise", "send it back with questions; the draft is deleted"),
-                                           ("reject", "delete the draft; nothing is kept")])
+def ask_decision(revise=True):
+    """The person's decision: approve (with their name), revise (with questions) or reject."""
+    action = choose("Decision", [("approve", "write the report under your name")]
+                    + ([("revise", "send it back to the agent with questions")] if revise else [])
+                    + [("reject", "nothing is written")])
     decision = {"action": action}
     while action == "approve" and not decision.get("name"):
         decision["name"] = input("Approving officer's full name: ").strip()
@@ -702,15 +633,15 @@ async def run(args):
             snapshot = await graph.aget_state(config)
             if not snapshot.next:
                 break
-            payload = Command(resume=await gate(run_id, tools, snapshot.values["report"], usage))
+            payload = Command(resume=await gate(run_id, snapshot.values["report"], usage))
         final = (await graph.aget_state(config)).values
-        print(final.get("saved") or "Not saved: the reviewer rejected the draft.")
+        print(final.get("saved") or "Not saved: the reviewer rejected it.")
         audit(run_id, event="run_finished", saved=final.get("saved"), cost=usage.summary())
 
 
 async def review_unattended(run_id):
     """`fairprice --review RUN_ID`, started by the server's review_with_fairprice: FairPrice's agent reviews every
-    line of an existing run, writes the draft and an approval request, and records the outcome for review_status."""
+    line of an existing run and records a summary for review_status; a person then approves it in the calling app."""
     from fairprice import batch, server
     run = get_run(run_id)
     if run is None:
@@ -721,10 +652,11 @@ async def review_unattended(run_id):
             usage = Usage()
             await batch.analyse(graph, run.lines, base, run_id, usage=usage)
             add_step(run_id, "*", "cost", usage.summary())
-            drafted = as_json(tool_text(await tools["write_price_review"].ainvoke({"run_id": run_id})))
         _, lines, states = server.review(run_id)
         summary = report.summary(lines, states, run.bidders, run.checks or [], run.request)
-        add_step(run_id, "*", "status", {"state": "done", **drafted, "summary": summary, "cost": usage.summary()})
+        add_step(run_id, "*", "status", {"state": "done", "summary": summary, "cost": usage.summary(),
+                                         "next": "Show the summary to a person; if they approve, call "
+                                                 "write_price_review with their full name."})
         print(summary)
     except BaseException as e:
         add_step(run_id, "*", "status", {"state": "failed", "error": repr(e)[:300]})
@@ -732,8 +664,8 @@ async def review_unattended(run_id):
 
 
 async def remote(args):
-    """FairPrice as a thin client of a FairPrice server (FAIRPRICE_SERVER_URL, with the app key FAIRPRICE_API_KEY):
-    it sends the tender or item, the server's agent reviews it, and a person approves on the server's page."""
+    """FairPrice as a thin client of a FairPrice server (FAIRPRICE_SERVER_URL, with the access key FAIRPRICE_API_KEY):
+    it sends the package or item, the server's agent reviews it, and the person here approves or rejects it."""
     import base64
     url = os.environ["FAIRPRICE_SERVER_URL"].rstrip("/")
     client = MultiServerMCPClient({"fairprice": {
@@ -765,8 +697,12 @@ async def remote(args):
         await asyncio.sleep(POLL_SECONDS)
     if status["state"] == "failed":
         raise SystemExit(f"The review failed: {status.get('error')}")
-    print(f"\n{status.get('summary', '')}\n\nDraft report: " + ", ".join(status.get("files", [])))
-    print(status.get("message") or status.get("error", ""))
+    print(f"\n{status.get('summary', '')}\n\n{report.NOTICE}\n")
+    decision = ask_decision(revise=False)
+    if decision["action"] == "reject":
+        return print("Not saved: the reviewer rejected it.")
+    saved = await call("write_price_review", run_id=run_id, approved_by=decision["name"])
+    print(json.dumps(saved, indent=2, ensure_ascii=False))
 
 
 POLL_SECONDS = 15
@@ -786,8 +722,6 @@ def main():
     p.add_argument("--resume", help="resume a paused run by its id (with --package: reuse that batch's finished lines)")
     p.add_argument("--audit", metavar="RUN_ID", help="print the audit log of a run or batch, then exit")
     p.add_argument("--check", action="store_true", help="check the setup (model, data, storage) and say how to fix it")
-    p.add_argument("--approve", metavar="REQUEST", nargs="?", const="",
-                   help="decide a request from an AI app to approve a report or add a country (no id: list them)")
     p.add_argument("--format", choices=report.FORMATS, default=os.environ.get("FAIRPRICE_REPORT_FORMAT", "xlsx"),
                    help="report file format (default: FAIRPRICE_REPORT_FORMAT, or xlsx)")
     args = p.parse_args()
@@ -796,8 +730,6 @@ def main():
         raise SystemExit(1 if check_setup() else 0)
     if args.audit:
         return show_audit(args.audit)
-    if args.approve is not None:
-        return approve_request(args.approve)
     if args.template:
         from fairprice import batch
         return print(batch.template(args.template))

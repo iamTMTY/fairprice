@@ -1,7 +1,7 @@
 """Run evals/cases.json against the real agent, several times each, and record every result.
 
 Usage: uv run fairprice-evals --repeats 3 [--model ollama:gemma4] [--cases hilux-above,no-benchmark]
-Every run is stopped at the approval gate with "reject", which also tests that nothing is saved.
+Every run is stopped at the person's decision with "reject", which also tests that nothing is saved.
 """
 
 import argparse
@@ -142,21 +142,13 @@ def sandbox(provider="file", fmt="xlsx"):
         yield
 
 
-def approve(run_id):
-    """A person's approval of the review as it is now."""
-    return db.grant("write_price_review", server.version(run_id), "A. Officer")
-
-
 def round_trip(provider, fmt):
-    """Start -> search -> check -> draft -> approve -> list -> retrieve -> the files say who approved -> the draft
-    files are gone."""
+    """Start -> search -> check -> write under a person's name -> list -> retrieve -> the files say who approved it."""
     from fairprice.storage import storage
 
     with sandbox(provider, fmt):
         run_id = checked_run()
-        drafted = server.write_price_review(run_id)
-        draft_files = [f"{drafted.get('draft')}.{ext}" for ext in ("xlsx", "csv", "json")]
-        saved = server.write_price_review(run_id, approve(run_id))
+        saved = server.write_price_review(run_id, "A. Officer")
         listed = server.get_price_review()
         got = server.get_price_review(run_id)
         texts = []
@@ -165,58 +157,34 @@ def round_trip(provider, fmt):
             if fmt == "xlsx":
                 from openpyxl import load_workbook
                 ws = load_workbook(io.BytesIO(content))["Prices"]
-                content = str(ws.cell(ws.max_row, 1).value).encode()
+                content = " ".join(str(c.value) for c in ws["A"] if c.value).encode()
             texts.append(content.decode("utf-8-sig"))
-        drafts_left = []
-        for name in draft_files:
-            try:
-                storage().load(name)
-                drafts_left.append(name)
-            except Exception:
-                pass
-    passed = (drafted.get("status") == "needs_approval"
-              and [r["run_id"] for r in listed.get("reports", [])] == [run_id]
-              and got.get("report", {}).get("approved_by") == "A. Officer" and texts and not drafts_left
+    passed = ([r["run_id"] for r in listed.get("reports", [])] == [run_id]
+              and got.get("report", {}).get("approved_by") == "A. Officer" and texts
               and all("A. Officer" in t for t in texts))
-    return {"case": f"report ({fmt}, {provider} storage): drafted, approved, listed, retrieved as json, draft removed",
-            "passed": bool(passed), "detail": {"saved": saved, "listed": listed, "drafts_left": drafts_left}}
+    return {"case": f"report ({fmt}, {provider} storage): written under the approver's name, listed, retrieved as json",
+            "passed": bool(passed), "detail": {"saved": saved, "listed": listed}}
 
 
 def deterministic_checks():
-    """Run and gate checks that need no model: a report is built only from what its run recorded, needs a
-    person's approval of that exact version, and is refused when unsourced."""
+    """Run checks that need no model: a report is built only from what its run recorded, carries the approver's
+    name, and is refused when unsourced."""
     empty = {"assessment": "insufficient_comparables", "accepted": [], "excluded": []}
     forged = {"assessment": "within_band", "accepted": [{"id": 999999999}], "excluded": []}
     with sandbox():
-        a, b, c, d, e = checked_run(), checked_run(result=empty), checked_run([999999999], forged), checked_run(), checked_run()
-        asked = server.write_price_review(a)
-        stale = approve(e)
-        server.check_price_comparability(e, [KNOWN_RECORD], {str(KNOWN_RECORD): "not comparable"})
+        a, b, c, d = checked_run(), checked_run(result=empty), checked_run([999999999], forged), checked_run()
         checks = {
-            "write refused with an approval for a different review": server.write_price_review(a, approve(d)),
-            "write refused with an approval of an older version of the review": server.write_price_review(e, stale),
-            "write refused for a review that cites no records": server.write_price_review(b, approve(b)),
-            "write refused for a review citing a record that does not exist": server.write_price_review(c, approve(c)),
-            "write refused for a review that does not exist": server.write_price_review("../pyproject.toml", "x"),
+            "write refused without the approver's name": server.write_price_review(a, " "),
+            "write refused for a review that cites no records": server.write_price_review(b, "A. Officer"),
+            "write refused for a review citing a record that does not exist": server.write_price_review(c, "A. Officer"),
+            "write refused for a review that does not exist": server.write_price_review("../pyproject.toml", "A. Officer"),
             "check refused when none of its records came from the review's searches":
                 server.check_price_comparability(a, [KNOWN_RECORD + 1]),
             "search refused for a review that does not exist": server.find_comparables("nope", ["laptop"]),
         }
-        once = approve(d)
-        first, second = (db.use_approval(once, "write_price_review", server.version(d)),
-                         db.use_approval(once, "write_price_review", server.version(d)))
-        server.discard_review(a)  # the person rejected the draft
-        db.decide(asked["request"], True, "A. Officer")
-        discarded = server.write_price_review(a, asked["request"])
         replay = server.review(d)[2]["1"]["final"] == server.check_price_comparability(d, [KNOWN_RECORD])
         mixed = server.check_price_comparability(d, [KNOWN_RECORD, KNOWN_RECORD + 1])
-    results = [{"case": "write without a person's approval only drafts and records a request", "detail": asked,
-                "passed": asked.get("status") == "needs_approval" and "fairprice --approve" in asked.get("message", "")}]
-    results += [{"case": name, "passed": "error" in out, "detail": out} for name, out in checks.items()]
-    results.append({"case": "a person's approval can be used only once", "passed": bool(first) and second is None,
-                    "detail": None})
-    results.append({"case": "a rejected draft can no longer be approved", "passed": "error" in discarded,
-                    "detail": discarded})
+    results = [{"case": name, "passed": "error" in out, "detail": out} for name, out in checks.items()]
     results.append({"case": "a review rebuilt from its recorded steps matches the tool's answer", "passed": replay,
                     "detail": None})
     results.append({"case": "a record the review's searches did not find is left out of the band, and named",
