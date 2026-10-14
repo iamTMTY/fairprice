@@ -1,6 +1,6 @@
 # Evals
 
-Ten tasks: nine single items on real Nigerian and Kenyan procurement data, and one synthetic bid package. There are also 22 checks that need no model. Every task runs the full agent (Analyst, Challenger, recheck, draft) and is stopped at the approval gate with "reject", which also tests that nothing is saved without approval.
+Ten tasks: nine single items on real Nigerian and Kenyan procurement data, and one synthetic bid package. There are also 25 checks that need no model. Every task runs the full agent (Analyst, Challenger, recheck, draft) and is stopped at the approval gate with "reject", which also tests that nothing is saved without approval.
 
 Run them with `uv run fairprice-evals --repeats 2 --model ollama:gemma4`. Raw results for every run, including failed rounds, are in `evals/results/`. The full tool-call trace of every run is in the `audit_log` table of `data/runs.sqlite` (not committed; regenerate by running the suite). Print one run with `uv run fairprice --audit <run id>`.
 
@@ -21,8 +21,8 @@ Expected answers come from bands we built by hand from records we read one by on
 | `placeholder-dates` | Any assessment | Two ProBook records dated 2001-01-01, a NOCOPO placeholder |
 | `bid-package` | `examples/bid-package.xlsx`, 3 lines and 3 invented bidders: Bidder B's NGN 300M Hilux is `above_band`, the other 7 quoted prices are `within_band`, the line Bidder C left out is `not priced`, and the output has no total, rank or recommendation column | Checks assessments only, not trap records (see weak spots) |
 | no model | Runs: `write_price_review` without a person's approval only drafts and records a request; it refuses an approval for a different review or an older version of the same review, a review with no citations or a citation of a record that does not exist, and a review that does not exist; an approval works only once; a rejected draft cannot be approved; a price check keeps out records the review's searches did not find (and is refused if none came from them); a review rebuilt from its recorded steps matches the live answer; each format (xlsx, csv, json, and xlsx in mocked S3) goes from draft to approved and comes back from `get_price_review` as JSON | |
-| no model | The bid file checks find exactly the 4 problems planted in the package: an arithmetic error, a changed quantity, a missing line, and two bidders with identical prices | |
-| no model | The xlsx, csv and json templates read to the same package; packages with an unknown column, a price in words, a line not in the BoQ, or no BoQ are refused with their location | |
+| no model | The bid file and document checks find exactly the 7 problems planted in the package: an arithmetic error, a changed quantity, a missing line, two bidders with identical prices, a tender security not submitted, a tax certificate expired before closing, and a tax clearance missing a year | |
+| no model | The xlsx, csv and json templates read to the same package (csv without its documents checklist); packages with an unknown column, a price in words, a line not in the BoQ, no BoQ, a document rule that is not one of the three, a tick that does not fit its rule, or a document column for someone who did not bid are refused with their location | |
 
 ## Results
 

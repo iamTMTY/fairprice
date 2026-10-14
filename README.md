@@ -156,15 +156,46 @@ Choose the file format with `--format` or `FAIRPRICE_REPORT_FORMAT`:
 
 Whatever the format, the report is also kept as data in the `reports` table of `data/runs.sqlite`, and the MCP tool `get_price_review` returns it as JSON.
 
-## Review a whole bid package
+## Review a whole tender
+
+One workbook holds the whole tender, and one run does the whole job: tick off each bidder's documents, check each bid file, compare every price with past purchases, and write one report for a person to approve.
 
 ```bash
-uv run fairprice --package examples/bid-package.xlsx --year 2025    # or .csv, or .json
+uv run fairprice --template tender.xlsx                     # a blank workbook with every sheet (or .json, or .csv)
+uv run fairprice --package tender.xlsx --year 2025          # read, check, compare, draft the report, approve
+uv run fairprice --package examples/bid-package.xlsx --year 2025   # try it on the example
 ```
 
-`examples/bid-package.xlsx`, `.csv` and `.json` are the same **synthetic** package in three forms: three invented bidders, invented prices and four planted problems. Use them as templates. All three must match one schema, [`src/fairprice/bid_package.schema.json`](src/fairprice/bid_package.schema.json), which another system can use to check a file before sending it.
+| Sheet | What goes in it |
+|---|---|
+| **BoQ** | The bill of quantities: Item No, Description, Unit, Quantity, and optionally Budget per unit |
+| **Documents** | The documents the tender requires, one row each (Ref, Document, Rule), and one column per bidder for the committee's ticks |
+| **One sheet per bidder**, named after the bidder | That bidder's price schedule: Item No, Unit Price, and optionally Description, Unit, Quantity, Total Price |
 
-**The spreadsheet columns are those of a PPRA price schedule**, the form that Kenya's Public Procurement Regulatory Authority's standard tender documents ask every bidder to fill in (Item No, Description, Unit, Quantity, Unit Price, Total Price). A bidder's schedule can be pasted in as it is. The headings other procuring entities use for the same columns are accepted too:
+`examples/bid-package.xlsx`, `.csv` and `.json` are the same **synthetic** tender: three invented bidders, invented prices, and seven planted problems (four in the price schedules, three in the documents). All forms must match one schema, [`src/fairprice/bid_package.schema.json`](src/fairprice/bid_package.schema.json), which another system can use to check a file before sending it. A json package holds the same three parts: `{"boq": [...], "documents": [...], "bids": [...]}`. A csv file holds one table, so it carries the BoQ and the price schedules (rows whose Bidder is `BoQ` are the bill of quantities) but no documents checklist; use xlsx or json for that.
+
+### Ticking off documents
+
+Every tender lists the documents a bid must include (the form of tender, the signed price schedule, a tender security, tax and registration certificates…); a bid missing one is rejected before its prices are looked at. Copy the tender's list into the Documents sheet and tick each bidder:
+
+| Ref | Document | Rule | Bidder A | Bidder B | Bidder C |
+|---|---|---|---|---|---|
+| 1 | Form of Tender, signed and stamped | Submitted | Yes | Yes | Yes |
+| 2 | Tender security | Submitted | Yes | Yes | No |
+| 3 | Tax compliance certificate | Valid on 2025-10-15 | 2026-06-30 | 2025-09-30 | 2026-03-31 |
+| 4 | Tax clearance certificate | Covers 2022-2024 | 2022-2024 | 2022-2024 | 2023-2024 |
+
+| Rule | What a bidder's cell holds | What FairPrice reports |
+|---|---|---|
+| `Submitted` | Yes or No | "Bidder C did not submit document 2: Tender security" |
+| `Valid on YYYY-MM-DD` (usually the closing date) | The date the document is valid until (an Excel date or YYYY-MM-DD), or No | "Tax compliance certificate is valid until 2025-09-30, but the tender requires it to be valid on 2025-10-15" |
+| `Covers YYYY-YYYY` | The years it covers (such as 2022-2024), or No | "covers 2023-2024, but the tender requires 2022–2024 (missing 2022)" |
+
+The report shows each bidder's documents as "All required documents" or "N document problems", lists every problem with its cell, and adds a Documents sheet with the checklist and each result. **FairPrice checks documents as the committee recorded them; it cannot tell whether a certificate is genuine.** That needs the issuing body (a tax authority's certificate checker, the company registry), and the report does not claim otherwise.
+
+### The columns
+
+The price columns are those of a standard price schedule (Item No, Description, Unit, Quantity, Unit Price, Total Price), so a bidder's schedule can usually be pasted in as it is. The headings procuring entities commonly use for the same columns are accepted too:
 
 | Field | Accepted headings (any case; notes in brackets and a currency such as "in KES" are ignored) | Where |
 |---|---|---|
@@ -180,33 +211,27 @@ uv run fairprice --package examples/bid-package.xlsx --year 2025    # or .csv, o
 
 So KRA's "Rate in KES (VAT inclusive)" and "Total Amount (KES)" read as the unit price and the total.
 
-| Form | Layout |
-|---|---|
-| xlsx | A sheet named `BoQ` (Item No, Description, Unit, Quantity, Budget per unit). One sheet per bidder, named after the bidder, with that bidder's price schedule (Item No, Description, Unit, Quantity, Unit Price, Total Price). |
-| csv | One file with a Bidder column and the same headings. Rows whose bidder is `BoQ` are the bill of quantities; every other value is a bidder. |
-| json | `{"boq": [{"line", "item", "unit", "quantity", "budget"}], "bids": [{"bidder", "lines": [{"line", "item", "unit", "quantity", "unit_price", "total"}]}]}` |
-
-**FairPrice does not interpret a package; it checks it.** Every column must have one of the headings above, and only one column may have each meaning. Prices must be plain numbers (`2500000`, `2,500,000` or `2500000.50`). Every bid line must be a line in the BoQ. A package that breaks any rule is refused before any analysis, with each problem and where it is, for example:
+**FairPrice does not interpret a package; it checks it.** Every column must have one of the headings above, and only one column may have each meaning. Prices must be plain numbers (`2500000`, `2,500,000` or `2500000.50`). Every bid line must be a line in the BoQ. A document rule must be one of the three, and every cell must fit its rule. A package that breaks any rule is refused before any analysis, with each problem and where it is, for example:
 
 ```
 - sheet “Bidder B”, row 1: unknown column(s) Price per piece; the columns are Item No, Description, Unit, Quantity, Unit Price, Total Price, Country of Origin
 - bid-package.csv, row 7, Unit Price: 'NGN 2,500,000' is not a number
-- bids[0].lines[0]: 'unit_price' is a required property
+- sheet “Documents”, row 4, Bidder A: 'Yes'; write the date it is valid until (YYYY-MM-DD), or No
 ```
 
-Problems are reported in two passes: cells that cannot be read first, then rules such as lines missing from the BoQ. A bid with mistakes in its numbers (totals that do not add up, missing lines, changed quantities) is read; those mistakes are findings for the committee, not reasons to refuse the file.
+Problems are reported in two passes: cells that cannot be read first, then rules such as lines missing from the BoQ. A bid with mistakes in its numbers (totals that do not add up, missing lines, changed quantities) or missing documents is read; those are findings for the committee, not reasons to refuse the file.
 
 Before the agent starts, FairPrice prints what it read, so a wrong file is caught in seconds:
 
 ```
-Read bid-package.xlsx: BoQ with 3 lines, 3 bidders
+Read bid-package.xlsx: BoQ with 3 lines, 3 bidders, 4 required documents
   Bidder A: 3 of 3 lines priced
   Bidder C: 2 of 3 lines priced (not priced: 3)
 ```
 
-**What you get:** one draft report for the whole package, in the same two-table layout and your chosen format. If the BoQ has budgets, each quote is also shown against its line's budget ("Times the budget"). The bid file checks appear in each bidder's "Problems in this bid" column, in plain sentences that name the sheet and row: totals that do not add up, missing lines, quantities that differ from the bill of quantities, and bidders quoting identical prices on most lines. Each finding also says what PPRA's standard tender document for goods says about it, for example "a miscalculation of unit price, quantity or total is a major deviation that makes the tender non-responsive (ITT 30.2)". A tender's own data sheet can be stricter (KRA's makes any unquoted item disqualifying), and the committee decides. Bidders appear in the order the file lists them, and are never totalled or ranked.
+**What you get:** one draft report for the whole tender, in your chosen format. Each bidder's documents result; each quote against past prices and, if the BoQ has budgets, against the budget ("Times the budget"); and each bidder's problems in plain sentences that name the sheet and row: totals that do not add up, missing lines, quantities that differ from the bill of quantities, bidders quoting identical prices on most lines, and missing, expired or incomplete documents. Findings state facts, not law: what a finding means (an arithmetic error is corrected in some countries' rules and disqualifying in others) is for the committee under its own rules. Bidders appear in the order the file lists them, and are never totalled, ranked or recommended.
 
-**Why this is a step in the procedure, not an extra.** PPRA's standard tender document tells the procuring entity what to do with an abnormally high tender (ITT 36): "make a survey of the market prices" and "check if the estimated cost of the contract is correct". FairPrice is that survey, from published past awards, with every price sourced; with a budget in the BoQ, it also shows whether the budget itself is in line with past prices. For an abnormally low tender (ITT 35), the entity asks the bidder for a price analysis; FairPrice's "well below past prices" is where to start.
+**Why the price comparison is a step in the procedure, not an extra.** Kenya's PPRA standard tender document tells the procuring entity what to do with an abnormally high tender (ITT 36): "make a survey of the market prices" and "check if the estimated cost of the contract is correct". In Nigeria, BPP's Price Intelligence Unit reviews project costs against benchmark unit rates before approval. FairPrice does that survey from published past awards, with every price sourced; with a budget in the BoQ, it also shows whether the budget itself is in line with past prices.
 
 You approve, revise or reject the package once. On `revise`, you also choose which lines to redo.
 
@@ -331,7 +356,7 @@ Created when you run it (not in the repo): `data/` (downloads, database, run sta
 uv run pytest --cov
 ```
 
-89 tests, 99% line and branch coverage, about 30 seconds, and no model or network needed. They run against a small synthetic dataset built through the real ingest (registry, downloads and World Bank mocked): a Nigeria-style publication with item quantities and the traps the agent must handle (a bundle, a placeholder date, a test record, a duplicate, a multi-item contract), a Kenya-style one with award totals only, and a Rwanda-style one with prices per item. A scripted model stands in for Gemma, so the agent graph, the approval gate, the CLI, the bid packages and the eval runner all run for real; one integration test starts both MCP servers as subprocesses over stdio. The tests never touch `data/`, `reports/` or your database.
+92 tests, 99% line and branch coverage, about 30 seconds, and no model or network needed. They run against a small synthetic dataset built through the real ingest (registry, downloads and World Bank mocked): a Nigeria-style publication with item quantities and the traps the agent must handle (a bundle, a placeholder date, a test record, a duplicate, a multi-item contract), a Kenya-style one with award totals only, and a Rwanda-style one with prices per item. A scripted model stands in for Gemma, so the agent graph, the approval gate, the CLI, the bid packages and the eval runner all run for real; one integration test starts both MCP servers as subprocesses over stdio. The tests never touch `data/`, `reports/` or your database.
 
 The tests prove the code does what it should. They do not measure how good the model's judgement is; that is what the evals are for (EVALS.md).
 
@@ -359,7 +384,7 @@ Whether a country can give prices per item depends on what it publishes. FairPri
 | A quantity for each contract item | Nigeria | Prices per item for single-item contracts (contract value ÷ quantity) |
 | Award totals, no quantities | Kenya | Searches only; every price check ends in "No comparison possible" |
 
-**So a Kenyan bid package can be read and checked today, but not benchmarked against Kenyan past prices.** The bid format follows Kenya's PPRA, and the bid file checks work on any package. Kenya's published awards carry no quantities, so they give no price per item. Until they do, a Kenyan package's prices can be compared with another loaded country's past awards (`--country NG --currency KES`, converted at World Bank exchange rates and adjusted for inflation), which is evidence of a different market and should be read as such.
+**So a Kenyan tender can be read and checked today, but not benchmarked against Kenyan past prices.** The documents and bid file checks work on any tender. Kenya's published awards carry no quantities, so they give no price per item. Until they do, a Kenyan package's prices can be compared with another loaded country's past awards (`--country NG --currency KES`, converted at World Bank exchange rates and adjusted for inflation), which is evidence of a different market and should be read as such.
 
 ## Data and its limits
 
@@ -384,7 +409,7 @@ Not built. Each would be measured against the eval cases before replacing anythi
 
 **A code rule for bundles.** Reject records whose description names another model of the same brand (a Hilux search that finds "Land Cruiser" or "Prado"). That is precise where embeddings are fuzzy, and it targets the failure in EVALS.md that we have not fixed.
 
-**Reading bid files in any layout.** See "Designed, not built yet" under "Review a whole bid package".
+**Reading bid files in any layout.** See "Designed, not built yet" under "Review a whole tender".
 
 ## Licence
 

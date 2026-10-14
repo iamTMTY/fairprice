@@ -218,11 +218,13 @@ def start_review(item: str, unit_price: float, currency: str = "", year: int | N
 @mcp.tool()
 def start_package_review(package: dict, title: str = "bid package", currency: str = "", year: int | None = None,
                          country: str = "NG") -> dict:
-    """Start a review of a whole bid package: a bill of quantities and every bidder's price schedule, in the bid
-    package format (bid_package.schema.json: {"boq": [{line, item, quantity}], "bids": [{bidder, lines: [{line,
-    unit_price, quantity, total}]}]}). A package that does not match is refused with every problem. Returns the
-    run_id, its lines and the problems found in the bid files. Review each line with line="<its number>".
-    Bidders are never totalled or ranked.
+    """Start a review of a whole tender: its bill of quantities, its checklist of required documents and every
+    bidder's price schedule, in the bid package format (bid_package.schema.json: {"boq": [{line, item, unit,
+    quantity, budget}], "documents": [{ref, document, rule, bidders: {bidder: value}}], "bids": [{bidder, lines:
+    [{line, unit_price, quantity, total}]}]}). A document rule is "Submitted", "Valid on YYYY-MM-DD" or "Covers
+    YYYY-YYYY"; a bidder's value is Yes/No, the date the document is valid until, or the years it covers. A package
+    that does not match is refused with every problem. Returns the run_id, its lines, and the problems found in the
+    bid files and documents. Review each line with line="<its number>". Bidders are never totalled or ranked.
     """
     from fairprice import batch
     try:
@@ -230,10 +232,12 @@ def start_package_review(package: dict, title: str = "bid package", currency: st
     except batch.PackageError as e:
         return {"error": "The package does not match the bid package format.", "problems": e.problems}
     boq, bidders = batch.unpack(package)
-    checks = batch.file_checks(boq, bidders)
+    checks = batch.document_checks(package) + batch.file_checks(boq, bidders)
     lines = batch.package_lines(boq, bidders)
     if (request := review_request(currency, year, country)) is None:
         return {"error": NOT_LOADED.format(country.upper())}
+    if package.get("documents"):
+        request["documents"] = batch.requirements(package)
     run_id = start_run("package", title, request, lines, list(bidders), checks)
     return {"run_id": run_id, "lines": lines, "bidders": list(bidders), **request,
             "bid_file_problems": len(checks)}

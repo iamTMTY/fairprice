@@ -22,6 +22,48 @@
       "budget": 1300000
     }
   ],
+  "documents": [
+    {
+      "ref": "1",
+      "document": "Form of Tender, signed and stamped",
+      "rule": "Submitted",
+      "bidders": {
+        "Bidder A": "Yes",
+        "Bidder B": "Yes",
+        "Bidder C": "Yes"
+      }
+    },
+    {
+      "ref": "2",
+      "document": "Tender security",
+      "rule": "Submitted",
+      "bidders": {
+        "Bidder A": "Yes",
+        "Bidder B": "Yes",
+        "Bidder C": "No"
+      }
+    },
+    {
+      "ref": "3",
+      "document": "Tax compliance certificate",
+      "rule": "Valid on 2025-10-15",
+      "bidders": {
+        "Bidder A": "2026-06-30",
+        "Bidder B": "2025-09-30",
+        "Bidder C": "2026-03-31"
+      }
+    },
+    {
+      "ref": "4",
+      "document": "Tax clearance certificate",
+      "rule": "Covers 2022-2024",
+      "bidders": {
+        "Bidder A": "2022-2024",
+        "Bidder B": "2022-2024",
+        "Bidder C": "2023-2024"
+      }
+    }
+  ],
   "bids": [
     {
       "bidder": "Bidder A",

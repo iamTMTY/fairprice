@@ -59,14 +59,17 @@ async def run_package(graph, case, model):
     run_id = None
     start = time.perf_counter()
     try:  # everything, including reading the package: one bad case must not stop the suite
-        boq, bidders = batch.read_package(ROOT / case["package"])
-        lines, checks = batch.package_lines(boq, bidders), batch.file_checks(boq, bidders)
-        run_id = db.start_run("package", case["package"], base, lines, list(bidders), checks)
+        package, where = batch.load(ROOT / case["package"])
+        boq, bidders = batch.unpack(package, where)
+        lines = batch.package_lines(boq, bidders)
+        checks = batch.document_checks(package, where) + batch.file_checks(boq, bidders)
+        request = {**base, "documents": batch.requirements(package)} if package.get("documents") else base
+        run_id = db.start_run("package", case["package"], request, lines, list(bidders), checks)
         agent.audit(run_id, event="run_started", sheet=case["package"], model=model)
         await batch.analyse(graph, lines, base, run_id, usage=usage)
         run, lines, states = server.review(run_id)
         got = {f"{line}/{b}": c["status"] for (line, b), c in report.cells(lines, states, run.bidders).items()}
-        data = report.build(run.title, lines, states, run.bidders, run.checks, base, run_id)
+        data = report.build(run.title, lines, states, run.bidders, run.checks, run.request, run_id)
         table = [{**data["prices"][0], **report.headings(data)[0][0]}]  # field names and spreadsheet headings
         failures = [f"line {k}: {got.get(k)}, expected {'/'.join(v)}" for k, v in case["expect_cells"].items()
                     if got.get(k) not in v]
@@ -222,13 +225,32 @@ def deterministic_checks():
                     and mixed.get("left_out", {}).get("ids") == [KNOWN_RECORD + 1], "detail": mixed})
     results += [round_trip("file", fmt) for fmt in report.FORMATS] + [round_trip("s3", "xlsx")]
     packages = [batch.load(ROOT / "examples" / f"bid-package.{ext}")[0] for ext in ("xlsx", "csv", "json")]
-    results.append({"case": "the xlsx, csv and json templates read to the same bid package",
-                    "passed": packages[0] == packages[1] == packages[2], "detail": None})
+    results.append({"case": "the xlsx, csv and json templates read to the same bid package (csv: without documents)",
+                    "passed": packages[0] == packages[2] and {**packages[0], "documents": None} ==
+                    {**packages[1], "documents": None}, "detail": None})
     head = "Bidder,Item No,Description,Quantity,Unit Price\n"
     bad = {"unknown column": "Bidder,Item No,Description,Quantity,Price per piece\nBoQ,1,Laptop,2,\nBidder A,1,,2,500\n",
            "price in words": head + "BoQ,1,Laptop,2,\nBidder A,1,,2,two million\n",
            "line not in the BoQ": head + "BoQ,1,Laptop,2,\nBidder A,9,,2,500\n",
            "no BoQ": head + "Bidder A,1,,2,500\n"}
+    package = json.loads((ROOT / "examples" / "bid-package.json").read_text())
+    bad_documents = {"a document rule that is not one of the three": ("rule", "Valid until next year"),
+                     "a document tick that does not fit its rule": ("bidders", {"Bidder A": "Yes", "Bidder B": "Yes",
+                                                                                  "Bidder C": "Yes"}),
+                     "a document column for someone who did not bid": ("bidders", {"Bidder A": "2026-01-01",
+                                                                                    "Bidder B": "2026-01-01",
+                                                                                    "Bidder C": "2026-01-01",
+                                                                                    "Bidder D": "2026-01-01"})}
+    for name, (field, value) in bad_documents.items():
+        changed = json.loads(json.dumps(package))
+        changed["documents"][2][field] = value  # the "Valid on" row
+        try:
+            batch.validate(changed)
+            refused = None
+        except batch.PackageError as e:
+            refused = e.problems
+        results.append({"case": f"a bid package with {name} is refused, with its location", "passed": bool(refused),
+                        "detail": refused})
     for name, text in bad.items():
         path = Path(tempfile.mkdtemp()) / "package.csv"
         path.write_text(text)
@@ -239,11 +261,14 @@ def deterministic_checks():
             refused = e.problems
         results.append({"case": f"a bid package with {name} is refused, with its location", "passed": bool(refused),
                         "detail": refused})
-    boq, bidders = batch.read_package(ROOT / "examples" / "bid-package.xlsx")
-    found = {(c["check"], c["bidder"], c["line"]) for c in batch.file_checks(boq, bidders)}
+    package, where = batch.load(ROOT / "examples" / "bid-package.xlsx")
+    checks = batch.document_checks(package, where) + batch.file_checks(*batch.unpack(package, where))
+    found = {(c["check"], c["bidder"], c["line"] or c["data"].get("ref")) for c in checks}
     planted = {("arithmetic_error", "Bidder B", "2"), ("quantity_changed", "Bidder C", "1"),
-               ("missing_line", "Bidder C", "3"), ("identical_prices", "Bidder A, Bidder C", "1, 2")}
-    results.append({"case": "bid file checks find the 4 planted problems, and only those",
+               ("missing_line", "Bidder C", "3"), ("identical_prices", "Bidder A, Bidder C", "1, 2"),
+               ("document_missing", "Bidder C", "2"), ("document_expired", "Bidder B", "3"),
+               ("document_years", "Bidder C", "4")}
+    results.append({"case": "bid file and document checks find the 7 planted problems, and only those",
                     "passed": found == planted, "detail": sorted(found ^ planted)})
     return results
 

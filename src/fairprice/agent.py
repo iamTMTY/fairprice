@@ -716,6 +716,7 @@ def main():
     p.add_argument("--country", default="NG", help="ISO code of a loaded country (see fairprice-ingest --list)")
     p.add_argument("--package", "--sheet", dest="sheet", metavar="FILE",
                    help="a bid package (.xlsx, .csv or .json) to review line by line; see README")
+    p.add_argument("--template", metavar="FILE", help="write a blank bid package (.xlsx, .csv or .json) to fill in")
     p.add_argument("--resume", help="resume a paused run by its id (with --package: reuse that batch's finished lines)")
     p.add_argument("--audit", metavar="RUN_ID", help="print the audit log of a run or batch, then exit")
     p.add_argument("--check", action="store_true", help="check the setup (model, data, storage) and say how to fix it")
@@ -731,6 +732,9 @@ def main():
         return show_audit(args.audit)
     if args.approve is not None:
         return approve_request(args.approve)
+    if args.template:
+        from fairprice import batch
+        return print(batch.template(args.template))
     if args.sheet:
         from fairprice import batch
         return asyncio.run(batch.run(args))

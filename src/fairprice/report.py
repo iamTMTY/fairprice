@@ -121,25 +121,8 @@ def sources(lines, states):
     return {i: n for n, i in enumerate(order, 1)}, info
 
 
-PPRA = {  # what each finding means under PPRA's standard tender document for goods (Kenya); the committee decides
-    "arithmetic_error": "Under the PPRA standard tender document (ITT 30.2), a miscalculation of unit price, quantity "
-                        "or total is a major deviation that makes the tender non-responsive.",
-    "quantity_changed": "The PPRA standard tender document asks the committee to confirm that every requirement of the "
-                        "Schedule of Requirements is met without material deviation (ITT 28.2).",
-    "missing_line": "Under the PPRA standard tender document (ITT 29.3), a missing item is priced at the average of "
-                    "the other responsive tenders, for comparison only, unless the tender data sheet makes unquoted "
-                    "items disqualifying.",
-    "identical_prices": "Each tenderer signs a Certificate of Independent Tender Determination with the Form of Tender.",
-}
-
-
 def check_text(c, cur):
-    """A bid file problem in plain sentences, naming where in the file it came from and what PPRA's rules say."""
-    rule = f" {PPRA[c['check']]}" if c["check"] in PPRA else ""
-    return problem_text(c, cur) + rule
-
-
-def problem_text(c, cur):
+    """A bid file or document problem as plain sentences, naming where in the file it came from."""
     where = f"{c['bidder']}, line {c['line']}" + (f" ({c['where']})" if c.get("where") else "")
     d = c.get("data") or {}
     if c["check"] == "arithmetic_error":
@@ -149,11 +132,37 @@ def problem_text(c, cur):
         return f"{where}: priced for {d['quoted']:g}, but the bill of quantities asks for {d['requested']:g}."
     if c["check"] == "missing_line":
         return f"{c['bidder']} did not price line {c['line']} ({d['item']})."
+    if c["check"] == "document_missing":
+        return f"{c['bidder']} did not submit document {d['ref']}: {d['document']} ({c['where']})."
+    if c["check"] == "document_expired":
+        return (f"{where_doc(c)}: {d['document']} is valid until {d['valid_until']}, but the tender requires it to be "
+                f"valid on {d['needed']}.")
+    if c["check"] == "document_years":
+        return (f"{where_doc(c)}: {d['document']} covers {d['covers']}, but the tender requires {d['needed']} "
+                f"(missing {', '.join(map(str, d['missing']))}).")
     if c["check"] == "identical_prices":
         return (f"{c['bidder'].replace(', ', ' and ')} quoted exactly the same price per item on {d['same']} of the "
                 f"{d['shared']} lines they both priced (lines {c['line']}). This can be coincidence, for example a "
                 "published price list; the committee may wish to look into it.")
     return f"{where}: {c['check']}."
+
+
+def where_doc(c):
+    return f"{c['bidder']}, document {c['data']['ref']}" + (f" ({c['where']})" if c.get("where") else "")
+
+
+DOC_RESULT = {"document_missing": "Not submitted", "document_expired": "Expired", "document_years": "Years missing"}
+
+
+def document_results(checks, bidders, documents):
+    """{(ref, bidder): result} for the checklist, and {bidder: summary}; None if the tender had no checklist."""
+    if not documents:
+        return None, None
+    found = {(k["data"]["ref"], k["bidder"]): DOC_RESULT[k["check"]] for k in checks or [] if k["check"] in DOC_RESULT}
+    per = {b: sum(1 for (_, who) in found if who == b) for b in bidders}
+    return ({(d["ref"], b): found.get((d["ref"], b), "OK") for d in documents for b in bidders},
+            {b: "All required documents" if not n else f"{n} document problem{'s' if n > 1 else ''}"
+             for b, n in per.items()})
 
 
 def draft_name(item, run_id):
@@ -174,6 +183,9 @@ def summary(lines, states, bidders, checks, base):
             ratio = f" ({c['ratio']:g}× typical)" if c["status"] in ("above_band", "below_band") else ""
             over = (f"; {c['times_budget']:g}× the budget" if c["times_budget"] and c["times_budget"] > 1 else "")
             out.append(f"    {b:<20} {money(c['price'], cur, True):>10}  {icon} {label}{ratio}{over}")
+    _, per = document_results(checks, bidders, base.get("documents"))
+    if per:
+        out.append(f"Documents ({len(base['documents'])} required): " + "; ".join(f"{b}: {v}" for b, v in per.items()))
     if checks:
         out.append(f"Problems in the bid files: {len(checks)}")
         out += [f"    - {check_text(c, cur)}" for c in checks]
@@ -190,6 +202,7 @@ def build(title, lines, states, bidders, checks, base, run_id, model=""):
     cs = cells(lines, states, bidders)
     refs, info = sources(lines, states)
     budgets = any(e.get("budget") for e in lines)  # the budget columns only when the BoQ has budgets
+    grid, per = document_results(checks, bidders, base.get("documents"))
     prices = []
     for entry in lines:
         final = (states.get(entry["line"]) or {}).get("final") or {}
@@ -203,6 +216,7 @@ def build(title, lines, states, bidders, checks, base, run_id, model=""):
                 **({"budget_per_item": c["budget"], "times_budget": c["times_budget"]} if budgets else {}),
                 "past_purchases_compared": band["n"] if band else len(final.get("accepted", [])),
                 "sources": sorted(refs[r["id"]] for r in final.get("accepted", [])),
+                **({"documents": per[b]} if per else {}),
                 "problems": [check_text(k, cur) for k in checks or []
                              if b in k["bidder"].split(", ") and entry["line"] in str(k["line"]).split(", ")]})
     adjusted = {r["id"]: r["adjusted_unit_price"] for st in states.values()
@@ -226,7 +240,10 @@ def build(title, lines, states, bidders, checks, base, run_id, model=""):
                        "prepared_by": f"FairPrice ({model})" if model else "FairPrice", "run_id": run_id,
                        "currency": cur, "prices_in_year": year, "country": base["country"],
                        "bid_file_checks": [check_text(k, cur) for k in checks] if checks is not None else None},
-            "prices": prices, "sources": srcs, "lines": how}
+            "prices": prices, "sources": srcs, "lines": how,
+            **({"documents": [{"ref": d["ref"], "document": d["document"], "rule": d["rule"],
+                               "results": {b: grid[(d["ref"], b)] for b in bidders}} for d in base["documents"]]}
+               if grid else {})}
 
 
 def status_line(data):
@@ -246,7 +263,7 @@ def headings(data):
               "times_typical": "Times the typical price", "result": "Result",
               "budget_per_item": f"Budget per item ({cur})", "times_budget": "Times the budget",
               "past_purchases_compared": "Past purchases compared",
-              "sources": "Sources (Ref numbers)", "problems": "Problems in this bid"}
+              "sources": "Sources (Ref numbers)", "documents": "Documents", "problems": "Problems in this bid"}
     srcs = {"ref": "Ref", "bought_by": "Bought by", "year": "Year", "what_was_bought": "What was bought",
             "quantity": "Quantity", "paid_per_item": "Paid per item", "currency": "Currency",
             "adjusted_price": f"In {year} money ({cur})", "published_by": "Published by",
@@ -256,24 +273,26 @@ def headings(data):
                          else f"L{v}" if k == "record_id"
                          else int(v) if isinstance(v, float) and v.is_integer() else v)  # 2, not 2.0
     return ([{prices[k]: flat(k, v) for k, v in r.items()} for r in data["prices"]],
-            [{srcs[k]: flat(k, v) for k, v in r.items()} for r in data["sources"]])
+            [{srcs[k]: flat(k, v) for k, v in r.items()} for r in data["sources"]],
+            [{"Ref": d["ref"], "Document": d["document"], "Rule": d["rule"], **d["results"]}
+             for d in data.get("documents", [])])
 
 
 def files(data, name, fmt):
     """{file name: bytes} for the report in one format."""
     if fmt == "json":
         return {f"{name}.json": json.dumps(data, indent=2, ensure_ascii=False).encode()}
-    prices, srcs = headings(data)
+    prices, srcs, docs = headings(data)
     if fmt == "csv":
         out = {}
-        for part, records in (("prices", prices), ("sources", srcs)):
+        for part, records in (("prices", prices), ("sources", srcs)) + ((("documents", docs),) if docs else ()):
             buf = io.StringIO()
             writer = csv.writer(buf)
             writer.writerow(["Status", *(records[0] if records else [])])
             writer.writerows([status_line(data), *r.values()] for r in records)
             out[f"{name}-{part}.csv"] = buf.getvalue().encode("utf-8-sig")  # the BOM lets Excel show ₦ correctly
         return out
-    return {f"{name}.xlsx": workbook(data, prices, srcs)}
+    return {f"{name}.xlsx": workbook(data, prices, srcs, docs)}
 
 
 BOLD = Font(bold=True)
@@ -300,15 +319,17 @@ def table(ws, records, widths, status, formats=None):
     ws.page_setup.orientation = "landscape"
 
 
-def workbook(data, prices, srcs):
-    """The xlsx file: Prices and Sources sheets."""
+def workbook(data, prices, srcs, docs=()):
+    """The xlsx file: Prices and Sources sheets, and Documents when the tender has a checklist."""
     cur, year, status = data["report"]["currency"], data["report"]["prices_in_year"], status_line(data)
     money_fmt = "#,##0"
     wb = Workbook()
     ws = wb.active
     ws.title = "Prices"
     budgets = bool(prices) and f"Budget per item ({cur})" in prices[0]
-    table(ws, prices, (6, 30, 11, 18, 16, 18, 11, 24) + ((16, 11) if budgets else ()) + (11, 16, 60), status,
+    documents = bool(prices) and "Documents" in prices[0]
+    table(ws, prices, (6, 30, 11, 18, 16, 18, 11, 24) + ((16, 11) if budgets else ()) + (11, 16)
+          + ((22,) if documents else ()) + (60,), status,
           {f"Quoted price per item ({cur})": money_fmt, f"Typical past price ({cur}, {year} money)": money_fmt,
            "Times the typical price": '0.00"×"', f"Budget per item ({cur})": money_fmt, "Times the budget": '0.00"×"'})
     fills = {label: colour for label, _, colour in STATUS.values() if colour}
@@ -317,6 +338,14 @@ def workbook(data, prices, srcs):
             ws.cell(row, 8).fill = PatternFill("solid", fgColor=fill)
     table(wb.create_sheet("Sources"), srcs, (6, 28, 7, 60, 9, 15, 9, 16, 30, 30, 12, 40, 14), status,
           {"Paid per item": money_fmt, f"In {year} money ({cur})": money_fmt})
+    if docs:
+        sheet = wb.create_sheet("Documents")
+        table(sheet, docs, (6, 40, 22) + (18,) * (len(docs[0]) - 3), status)
+        bad = PatternFill("solid", fgColor=STATUS["above_band"][2])
+        for row, r in enumerate(docs, 2):
+            for col, value in enumerate(r.values(), 1):
+                if col > 3 and value != "OK":
+                    sheet.cell(row, col).fill = bad
     out = io.BytesIO()
     wb.save(out)
     return out.getvalue()

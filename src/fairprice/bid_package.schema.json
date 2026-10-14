@@ -53,6 +53,50 @@
         }
       }
     },
+    "documents": {
+      "description": "The committee's checklist of the documents the tender requires: one entry per document, with what each bidder submitted.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "ref",
+          "document",
+          "rule",
+          "bidders"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "ref": {
+            "description": "The document's reference in the tender, unique.",
+            "type": [
+              "string",
+              "integer"
+            ],
+            "minLength": 1
+          },
+          "document": {
+            "description": "What is required, e.g. Tax compliance certificate.",
+            "type": "string",
+            "minLength": 1
+          },
+          "rule": {
+            "description": "Submitted, Valid on YYYY-MM-DD, or Covers YYYY-YYYY.",
+            "type": "string",
+            "minLength": 1
+          },
+          "bidders": {
+            "description": "For every bidder: Yes or No (Submitted); the date the document is valid until, or No (Valid on); the years it covers, or No (Covers).",
+            "type": "object",
+            "additionalProperties": {
+              "type": [
+                "string",
+                "integer"
+              ]
+            }
+          }
+        }
+      }
+    },
     "bids": {
       "description": "One entry per bidder.",
       "type": "array",

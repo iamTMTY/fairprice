@@ -157,3 +157,61 @@ def test_full_package_run_with_revise_and_approve(session, answers, capsys, monk
     bad = argparse.Namespace(**{**vars(args), "sheet": str(EXAMPLES / "missing.txt")})
     with pytest.raises(SystemExit, match="was not read"):
         asyncio.run(batch.run(bad))
+
+
+def test_the_documents_checklist_is_read_strictly(tmp_path):
+    import datetime as dt
+    package, where = batch.load(EXAMPLES / "bid-package.xlsx")
+    assert batch.requirements(package)[2] == {"ref": "3", "document": "Tax compliance certificate",
+                                              "rule": "Valid on 2025-10-15"}
+    found = {(c["check"], c["bidder"], c["data"]["ref"]) for c in batch.document_checks(package, where)}
+    assert found == {("document_missing", "Bidder C", "2"), ("document_expired", "Bidder B", "3"),
+                     ("document_years", "Bidder C", "4")}
+    assert "4 required documents" in batch.describe("x.xlsx", *batch.unpack(package, where), package["documents"])
+    wb = load_workbook(EXAMPLES / "bid-package.xlsx")
+    wb["Documents"]["E4"] = dt.datetime(2026, 1, 31)  # an Excel date cell reads as a date
+    wb.save(tmp_path / "dates.xlsx")
+    package, where = batch.load(tmp_path / "dates.xlsx")
+    assert package["documents"][2]["bidders"]["Bidder B"] == "2026-01-31"
+    assert not [c for c in batch.document_checks(package, where) if c["check"] == "document_expired"]
+    for cell, value, expected in (("A1", "Number", "the first columns must be Ref, Document, Rule"),
+                                  ("C3", "Valid soon", "rule 'Valid soon' is not Submitted"),
+                                  ("D3", "Maybe", "sheet “Documents”, row 3, Bidder A: 'Maybe'; write Yes or No"),
+                                  ("D4", None, "row 4, Bidder A: ''; write the date it is valid until"),
+                                  ("F1", "Bidder Z", "Bidder Z is not a bidder in this package"),
+                                  ("F1", None, "a bidder column with no name")):
+        wb = load_workbook(EXAMPLES / "bid-package.xlsx")
+        wb["Documents"][cell] = value
+        wb.save(tmp_path / "bad.xlsx")
+        assert expected in refused(tmp_path / "bad.xlsx")
+    wb = load_workbook(EXAMPLES / "bid-package.xlsx")
+    for row in list(wb["Documents"].iter_rows()):
+        for c in row:
+            c.value = None
+    wb.save(tmp_path / "empty.xlsx")
+    assert "sheet “Documents”: no rows" in refused(tmp_path / "empty.xlsx")
+    pkg = json.loads((EXAMPLES / "bid-package.json").read_text())
+    pkg["documents"].append(dict(pkg["documents"][0]))
+    with pytest.raises(batch.PackageError, match="document ref 1 appears more than once"):
+        batch.validate(pkg)
+    pkg["documents"] = [{**pkg["documents"][0], "bidders": {"Bidder A": "Yes"}}]
+    assert "no column for Bidder B, Bidder C" in "\n".join(pytest.raises(batch.PackageError, batch.validate, pkg).value.problems)
+    assert batch.rule_of("Valid on 2025-02-30") is None and batch.rule_of("covers 2023") == ("covers", {2023})
+    assert batch.value_of("covers", "Yes") is None and batch.value_of("valid", "31/12/2025") is None
+
+
+def test_template_in_each_format(tmp_path, monkeypatch):
+    for ext in ("xlsx", "csv", "json"):
+        said = batch.template(tmp_path / f"t.{ext}")
+        assert said.startswith(f"Wrote {tmp_path / f't.{ext}'}") and f"--package {tmp_path / f't.{ext}'}" in said
+    assert load_workbook(tmp_path / "t.xlsx").sheetnames == ["BoQ", "Documents", "Bidder 1", "Bidder 2"]
+    assert (tmp_path / "t.csv").read_text().startswith("Bidder,Item No,Description,Unit,Quantity,Budget per unit")
+    assert set(json.loads((tmp_path / "t.json").read_text())) == {"boq", "documents", "bids"}
+    with pytest.raises(SystemExit, match="already exists"):
+        batch.template(tmp_path / "t.xlsx")
+    with pytest.raises(SystemExit, match="use .xlsx, .csv or .json"):
+        batch.template(tmp_path / "t.txt")
+    from fairprice import agent
+    monkeypatch.setattr("sys.argv", ["fairprice", "--template", str(tmp_path / "u.json")])
+    agent.main()
+    assert (tmp_path / "u.json").exists()

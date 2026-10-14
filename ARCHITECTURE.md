@@ -20,12 +20,13 @@ The model judges; code counts. Every number in a report comes from a tool output
 
 ### Bid packages (`--package`)
 
-`batch.py` reads a bid package (xlsx, csv or json) into one form and checks it against `bid_package.schema.json`. Spreadsheet columns are those of a PPRA (Kenya) price schedule; a fixed table of headings maps each to one field ("Rate in KES (VAT inclusive)" is the unit price), and anything else is refused. It checks the rules the schema cannot express (unique BoQ lines and bidders, every bid line in the BoQ). A package that fails is refused with each problem's location; nothing is interpreted. Each row keeps its location (sheet and row, csv row, or JSON path) so findings can cite it. The whole package is one run, and each BoQ line is a line of that run. It runs the same graph once per distinct item, paused after Recheck, so it reuses the same evidence and the same evals. Each line's steps are recorded as they happen, so an interrupted package resumes (`--resume <run id>`) from the lines that finished. One failed line is reported and does not stop the batch.
+`batch.py` reads a bid package (xlsx, csv or json) into one form and checks it against `bid_package.schema.json`. Spreadsheet columns are those of a standard price schedule; a fixed table of headings maps each to one field ("Rate in KES (VAT inclusive)" is the unit price), and anything else is refused. A Documents sheet holds the tender's required documents and the committee's ticks, under one of three rules (Submitted, Valid on a date, Covers some years). It checks the rules the schema cannot express (unique BoQ lines and bidders, every bid line in the BoQ). A package that fails is refused with each problem's location; nothing is interpreted. Each row keeps its location (sheet and row, csv row, or JSON path) so findings can cite it. The whole package is one run, and each BoQ line is a line of that run. It runs the same graph once per distinct item, paused after Recheck, so it reuses the same evidence and the same evals. Each line's steps are recorded as they happen, so an interrupted package resumes (`--resume <run id>`) from the lines that finished. One failed line is reported and does not stop the batch.
 
-Code then does four things:
+Code then does five things:
 
 - compares every bidder's unit price with that item's band;
-- checks the bid files: arithmetic errors, missing lines, quantities that differ from the BoQ, and identical prices across bidders. Each finding states what PPRA's standard tender document for goods says about it (ITT 28.2, 29.3, 30.2); the committee decides;
+- ticks off documents: not submitted, expired before the date the tender requires, or missing years. Checked as the committee recorded them; FairPrice cannot tell whether a certificate is genuine;
+- checks the bid files: arithmetic errors, missing lines, quantities that differ from the BoQ, and identical prices across bidders. Findings state facts, not any country's law: what they mean is for the committee under its own rules;
 - shows each quote against the line's budget, if the BoQ has one;
 - builds one draft report for the package.
 
