@@ -109,8 +109,7 @@ def test_status_line_and_headings(package):
     assert report.status_line(data) == report.DRAFT_STATUS
     data["report"].update(status="approved", approved_by="Ada", approved_at="2026-10-12T10:00:00+01:00")
     assert report.status_line(data) == "Approved by Ada on 12 October 2026 at 10:00"
-    prices, srcs, docs = report.headings(data)
-    assert docs == []  # no checklist in this package
+    prices, srcs = report.headings(data)
     assert prices[0]["Quoted price per item (NGN)"] == 95000000 and isinstance(prices[0]["Quantity requested"], int)
     assert prices[0]["Sources (Ref numbers)"].startswith("1") and srcs[0]["FairPrice audit ID"].startswith("L")
 
@@ -197,30 +196,3 @@ def test_budget_columns_when_the_boq_has_budgets():
     ws = load_workbook(io.BytesIO(report.files(data, "B", "xlsx")["B.xlsx"]))["Prices"]
     assert ws["I1"].value == "Budget per item (NGN)" and ws["H1"].value == "Result"
     assert ws["H3"].fill.fgColor.rgb.endswith("F8D7D7")  # the result colour stays on the Result column
-
-
-def test_the_documents_checklist_in_the_report():
-    documents = [{"ref": "1", "document": "Tender security", "rule": "Submitted"},
-                 {"ref": "2", "document": "Tax compliance certificate", "rule": "Valid on 2025-10-15"}]
-    run = package_run("documents")
-    record, lines, states = server.review(run)
-    checks = [{"check": "document_missing", "bidder": "C", "line": None, "where": "sheet “Documents”, row 2, C",
-               "data": {"ref": "1", "document": "Tender security"}},
-              {"check": "document_expired", "bidder": "B", "line": None, "where": "sheet “Documents”, row 3, B",
-               "data": {"ref": "2", "document": "Tax compliance certificate", "valid_until": "2025-09-30",
-                        "needed": "2025-10-15"}}]
-    base = {**BASE, "documents": documents}
-    data = report.build("pkg", lines, states, record.bidders, checks, base, "d1")
-    assert [p["documents"] for p in data["prices"][:3]] == ["All required documents", "1 document problem",
-                                                            "1 document problem"]
-    assert data["documents"][0]["results"] == {"A": "OK", "B": "OK", "C": "Not submitted"}
-    assert data["documents"][1]["results"]["B"] == "Expired"
-    assert "line 1" not in " ".join(data["prices"][0]["problems"])  # document problems are not price problems
-    text = report.summary(lines, states, record.bidders, checks, base)
-    assert "Documents (2 required): A: All required documents; B: 1 document problem" in text
-    assert "valid until 2025-09-30, but the tender requires it to be valid on 2025-10-15" in text
-    wb = load_workbook(io.BytesIO(report.files(data, "D", "xlsx")["D.xlsx"]))
-    assert wb.sheetnames == ["Prices", "Sources", "Documents"]
-    assert [c.value for c in wb["Documents"][1]] == ["Ref", "Document", "Rule", "A", "B", "C"]
-    assert wb["Documents"]["F2"].fill.fgColor.rgb.endswith("F8D7D7") and wb["Documents"]["D2"].fill.fgColor.rgb in (None, "00000000")
-    assert "D-documents.csv" in report.files(data, "D", "csv")

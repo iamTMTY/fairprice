@@ -290,13 +290,11 @@ def start_review(item: str, unit_price: float, currency: str = "", year: int | N
 @tool
 def start_package_review(package: dict | None = None, title: str = "", currency: str = "", year: int | None = None,
                          country: str = "NG", file: str = "", filename: str = "") -> dict:
-    """Start a review of a whole tender: its bill of quantities, its checklist of required documents and every
-    bidder's price schedule, in the bid package format (bid_package.schema.json: {"boq": [{line, item, unit,
-    quantity, budget}], "documents": [{ref, document, rule, bidders: {bidder: value}}], "bids": [{bidder, lines:
-    [{line, unit_price, quantity, total}]}]}). A document rule is "Submitted", "Valid on YYYY-MM-DD" or "Covers
-    YYYY-YYYY"; a bidder's value is Yes/No, the date the document is valid until, or the years it covers. A package
-    that does not match is refused with every problem. Returns the run_id, its lines, and the problems found in the
-    bid files and documents. Review each line with line="<its number>". Bidders are never totalled or ranked.
+    """Start a review of a whole bid package: its bill of quantities and every bidder's price schedule, in the bid
+    package format (bid_package.schema.json: {"boq": [{line, item, unit, quantity, budget}], "bids": [{bidder,
+    lines: [{line, unit_price, quantity, total}]}]}). A package that does not match is refused with every problem.
+    Returns the run_id, its lines, and the problems found in the bid files. Review each line with
+    line="<its number>". Bidders are never totalled or ranked.
 
     Instead of package, send the tender workbook itself: file (its contents, base64) and filename (with .xlsx, .csv
     or .json); problems are then reported with their sheet and row. The format, an example and a blank workbook are
@@ -314,12 +312,10 @@ def start_package_review(package: dict | None = None, title: str = "", currency:
     except batch.PackageError as e:
         return {"error": "The package does not match the bid package format.", "problems": e.problems}
     boq, bidders = batch.unpack(package, where)
-    checks = batch.document_checks(package, where) + batch.file_checks(boq, bidders)
+    checks = batch.file_checks(boq, bidders)
     lines = batch.package_lines(boq, bidders)
     if (request := review_request(currency, year, country)) is None:
         return {"error": NOT_LOADED.format(country.upper())}
-    if package.get("documents"):
-        request["documents"] = batch.requirements(package)
     run_id = start_run("package", title or "bid package", request, lines, list(bidders), checks)
     return {"run_id": run_id, "lines": lines, "bidders": list(bidders), **request,
             "bid_file_problems": len(checks)}
@@ -740,20 +736,20 @@ def decide_request(request_id, approve, name):
 
 @mcp.resource("fairprice://bid-package/schema", mime_type="application/schema+json")
 def package_schema() -> str:
-    """The bid package format (JSON Schema): BoQ, required documents and each bidder's price schedule."""
+    """The bid package format (JSON Schema): the BoQ and each bidder's price schedule."""
     return Path(__file__).with_name("bid_package.schema.json").read_text()
 
 
 @mcp.resource("fairprice://bid-package/example", mime_type="application/json")
 def package_example() -> str:
-    """A complete example package (synthetic): three bidders, four required documents, seven planted problems."""
+    """A complete example package (synthetic): three bidders and four planted problems."""
     return (ROOT / "examples" / "bid-package.json").read_text()
 
 
 @mcp.resource("fairprice://bid-package/template.xlsx",
               mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 def package_template() -> bytes:
-    """A blank tender workbook: BoQ, Documents, and one sheet per bidder."""
+    """A blank bid package workbook: the BoQ and one sheet per bidder."""
     from fairprice import batch
     return batch.template_bytes(".xlsx")
 

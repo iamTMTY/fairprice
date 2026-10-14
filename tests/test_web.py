@@ -79,10 +79,10 @@ def test_a_workbook_uploaded_through_mcp_is_read_like_a_file(web):
     client, keys = web
     upload = base64.b64encode((EXAMPLES / "bid-package.xlsx").read_bytes()).decode()
     started = call(client, keys["app"], "start_package_review", file=upload, filename="tender.xlsx", year=2025)
-    assert started["bidders"] == ["Bidder A", "Bidder B", "Bidder C"] and started["bid_file_problems"] == 7
+    assert started["bidders"] == ["Bidder A", "Bidder B", "Bidder C"] and started["bid_file_problems"] == 4
     run = db.CALLER.set({"org": "acme", "role": "app", "name": "x"})
     try:
-        assert "sheet “Documents”" in db.get_run(started["run_id"]).checks[0]["where"]
+        assert "sheet “Bidder B”" in db.get_run(started["run_id"]).checks[0]["where"]
     finally:
         db.CALLER.reset(run)
     assert call(client, keys["app"], "start_package_review", file="%%%", filename="x.xlsx")["problems"] == ["file is not base64"]

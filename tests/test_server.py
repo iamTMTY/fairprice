@@ -175,13 +175,6 @@ def test_a_package_review_is_one_run_with_a_line_per_boq_line():
     band = server.check_price_comparability(run, ids(HILUX))
     assert band["price_under_review"] == 97e6  # the median of the bidders' prices
     assert "error" in server.start_package_review({"boq": []})
-    package["documents"] = [{"ref": "1", "document": "Tender security", "rule": "Submitted",
-                             "bidders": {"Bidder A": "Yes", "Bidder B": "No"}}]
-    started = server.start_package_review(package, "tender 8", year=2025)
-    assert started["bid_file_problems"] == 3  # Bidder B's tender security, and line 2 priced by nobody (twice)
-    run = server.get_run(started["run_id"])
-    assert run.request["documents"] == [{"ref": "1", "document": "Tender security", "rule": "Submitted"}]
-    assert run.checks[0]["check"] == "document_missing" and run.checks[0]["bidder"] == "Bidder B"
 
 
 def test_the_currency_defaults_to_the_countrys():

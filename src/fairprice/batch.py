@@ -7,23 +7,17 @@ Usage:
 A package must match bid_package.schema.json exactly; one that does not is refused with every problem and where it
 is, never interpreted. Spreadsheets use the column headings of a PPRA (Kenya) price schedule; HEADINGS lists the
 ones accepted for each field. The three forms of the same package:
-  xlsx  a sheet named "BoQ" (Item No, Description, Unit, Quantity, and optionally Budget per unit), optionally a sheet
-        named "Documents" (Ref, Document, Rule, then one column per bidder: the committee's checklist of required
-        documents), and one sheet per bidder, named after the bidder (Item No, Unit Price, and optionally
-        Description, Unit, Quantity, Total Price, Country of origin)
-  csv   one file with a Bidder column and the same headings; rows whose bidder is "BoQ" are the BoQ. A csv holds one
-        table, so it has no Documents checklist: use xlsx or json for that
+  xlsx  a sheet named "BoQ" (Item No, Description, Unit, Quantity, and optionally Budget per unit) and one sheet per
+        bidder, named after the bidder (Item No, Unit Price, and optionally Description, Unit, Quantity, Total Price,
+        Country of origin)
+  csv   one file with a Bidder column and the same headings; rows whose bidder is "BoQ" are the BoQ
   json  {"boq": [{line, item, unit, quantity, budget}],
-         "documents": [{ref, document, rule, bidders: {bidder: value}}],
          "bids": [{bidder, lines: [{line, unit_price, item, unit, quantity, total, country_of_origin}]}]}
-A document rule is "Submitted", "Valid on YYYY-MM-DD" or "Covers YYYY-YYYY"; a bidder's value is "Yes" or "No" for
-Submitted, the date the document is valid until (or No) for Valid on, and the years it covers (or No) for Covers.
 The agent builds one price band per distinct item, then code compares every bidder's price with it and checks the
 bid files. Bidders are never totalled, ranked or recommended.
 """
 
 import csv
-import datetime as dt
 import json
 import re
 import statistics
@@ -64,43 +58,6 @@ def plain(heading):
 
 
 FIELD = {plain(h): field for field, hs in HEADINGS.items() for h in hs}
-DOC_COLUMNS = ("ref", "document", "rule")  # then one column per bidder
-RULE = re.compile(r"^(?:(submitted)|valid on (\d{4}-\d{2}-\d{2})|covers (\d{4})(?:\s*[-–]\s*(\d{4}))?)$", re.I)
-YEARS = re.compile(r"^(\d{4})(?:\s*[-–]\s*(\d{4}))?$")
-
-
-def rule_of(text):
-    """("submitted", None) | ("valid", date) | ("covers", {years}), or None if the rule is not one of the three."""
-    m = RULE.match(" ".join(str(text).split()))
-    if not m:
-        return None
-    if m[1]:
-        return "submitted", None
-    if m[2]:
-        try:
-            return "valid", dt.date.fromisoformat(m[2])
-        except ValueError:
-            return None
-    return "covers", set(range(int(m[3]), int(m[4] or m[3]) + 1))
-
-
-def value_of(kind, text):
-    """What a checklist cell says under a rule: False (not submitted), True, a date or {years}; None if unreadable."""
-    t = str(text).strip()
-    if t.lower() in ("yes", "no"):
-        return (t.lower() == "yes") if kind == "submitted" or t.lower() == "no" else None
-    if kind == "valid":
-        try:
-            return dt.date.fromisoformat(t)
-        except ValueError:
-            return None
-    if kind == "covers" and (m := YEARS.match(t)):
-        return set(range(int(m[1]), int(m[2] or m[1]) + 1))
-    return None
-
-
-SHOULD = {"submitted": "Yes or No", "valid": "the date it is valid until (YYYY-MM-DD), or No",
-          "covers": "the years it covers (such as 2022-2024), or No"}
 NUMBER = re.compile(r"^-?(\d+|\d{1,3}(,\d{3})+)(\.\d+)?$")  # 2500000, 2,500,000 or 2500000.50; nothing else
 
 
@@ -162,9 +119,7 @@ def read_xlsx(path, problems):
         problems.append('no sheet named "BoQ" (the bill of quantities)')
     for name, rows in sheets.items():
         label = f"sheet “{name}”"
-        if name.strip().lower() == "documents":
-            package["documents"] = read_documents(rows, label, where, problems)
-        elif name.strip().lower() == "boq":
+        if name.strip().lower() == "boq":
             for w, r in records(rows, BOQ_COLUMNS, ("line", "item", "quantity"), label, problems):
                 where[("boq", len(package["boq"]))] = w
                 package["boq"].append(r)
@@ -175,33 +130,6 @@ def read_xlsx(path, problems):
                 bid["lines"].append(r)
             package["bids"].append(bid)
     return package, where
-
-
-def read_documents(rows, label, where, problems):
-    """The Documents checklist: Ref, Document, Rule, then one column per bidder, named exactly as its sheet."""
-    rows = [list(r) for r in rows if any(c not in (None, "") for c in r)]
-    if not rows:
-        problems.append(f"{label}: no rows")
-        return []
-    head = [str(c).strip() if c not in (None, "") else "" for c in rows[0]]
-    if [plain(h) for h in head[:3]] != list(DOC_COLUMNS):
-        problems.append(f"{label}, row 1: the first columns must be Ref, Document, Rule, then one column per bidder")
-        return []
-    bidders = head[3:]
-    if "" in bidders:
-        problems.append(f"{label}, row 1: a bidder column with no name")
-        return []
-    out = []
-    for n, r in enumerate(rows[1:], start=2):
-        r = r + [None] * (len(head) - len(r))
-        where[("documents", len(out))] = f"{label}, row {n}"
-        for b in bidders:
-            where[("documents", len(out), "bidders", b)] = f"{label}, row {n}, {b}"
-        text = lambda v: v.date().isoformat() if isinstance(v, dt.datetime) else (
-            str(int(v)) if isinstance(v, float) and v.is_integer() else "" if v is None else str(v).strip())
-        out.append({"ref": text(r[0]), "document": text(r[1]), "rule": text(r[2]),
-                    "bidders": {b: text(v) for b, v in zip(bidders, r[3:])}})
-    return out
 
 
 def read_csv(path, problems):
@@ -265,20 +193,6 @@ def validate(package, where=None, label="package"):
                 if line in seen:
                     problems.append(f"{at}: line {line} is priced twice")
                 seen.add(line)
-        refs = [str(d["ref"]) for d in package.get("documents", [])]
-        problems += [f"document ref {n} appears more than once" for n in sorted({n for n in refs if refs.count(n) > 1})]
-        for i, d in enumerate(package.get("documents", [])):
-            at, rule = locate(["documents", i], where), rule_of(d["rule"])
-            if rule is None:
-                problems.append(f"{at}: rule {d['rule']!r} is not Submitted, Valid on YYYY-MM-DD or Covers YYYY-YYYY")
-                continue
-            if unknown := sorted(set(d["bidders"]) - set(names)):
-                problems.append(f"{at}: {', '.join(unknown)} is not a bidder in this package")
-            if absent := [n for n in names if n not in d["bidders"]]:
-                problems.append(f"{at}: no column for {', '.join(absent)}")
-            for b, v in d["bidders"].items():
-                if b in names and value_of(rule[0], v) is None:
-                    problems.append(f"{locate(['documents', i, 'bidders', b], where)}: {str(v)!r}; write {SHOULD[rule[0]]}")
     if problems:
         raise PackageError(label, problems)
     for r in package["boq"]:
@@ -323,23 +237,15 @@ def template_bytes(kind):
     bid = [HEADINGS[c][0] for c in BID_COLUMNS if c != "country_of_origin"]
     if kind == ".json":
         return (json.dumps({"boq": [{"line": "1", "item": "", "unit": "", "quantity": 1, "budget": 0}],
-                            "documents": [{"ref": "1", "document": "", "rule": "Submitted", "bidders": {"Bidder 1": "Yes"}}],
                             "bids": [{"bidder": "Bidder 1", "lines": [{"line": "1", "unit_price": 0}]}]},
                            indent=2) + "\n").encode()
     if kind == ".csv":
         return (",".join([HEADINGS["bidder"][0], *dict.fromkeys(boq + bid)]) + "\n").encode()
     import io
     from openpyxl import Workbook
-    from openpyxl.comments import Comment
     wb = Workbook()
     wb.active.title = "BoQ"
     wb["BoQ"].append(boq)
-    docs = wb.create_sheet("Documents")
-    docs.append(["Ref", "Document", "Rule", "Bidder 1", "Bidder 2"])
-    docs["C1"].comment = Comment("One of: Submitted / Valid on YYYY-MM-DD / Covers YYYY-YYYY", "FairPrice")
-    docs["D1"].comment = Comment("One column per bidder, named exactly as the bidder's sheet. Write Yes or No; for "
-                                 "Valid on, the date the document is valid until; for Covers, the years it covers "
-                                 "(such as 2022-2024).", "FairPrice")
     for name in ("Bidder 1", "Bidder 2"):
         wb.create_sheet(name).append(bid)
     out = io.BytesIO()
@@ -355,9 +261,7 @@ def template(path):
     if path.exists():
         raise SystemExit(f"{path} already exists; choose another name")
     path.write_bytes(template_bytes(kind))
-    return (f"Wrote {path}. Fill in the BoQ"
-            + (", the documents the tender requires (Documents)" if kind != ".csv" else "")
-            + ", and each bidder's price schedule"
+    return (f"Wrote {path}. Fill in the BoQ and each bidder's price schedule"
             + (" (one sheet per bidder, named after the bidder; rename or add sheets)" if kind == ".xlsx" else "")
             + f". Then: uv run fairprice --package {path}")
 
@@ -366,43 +270,14 @@ def read_package(path):
     return unpack(*load(path))
 
 
-def describe(path, boq, bidders, documents=None):
+def describe(path, boq, bidders):
     """What was read, so a misread file is caught before the agent spends minutes on it."""
-    out = [f"Read {Path(path).name}: BoQ with {len(boq)} line{'s' if len(boq) != 1 else ''}, {len(bidders)} bidders, "
-           + (f"{len(documents)} required documents" if documents else "no documents checklist")]
+    out = [f"Read {Path(path).name}: BoQ with {len(boq)} line{'s' if len(boq) != 1 else ''}, {len(bidders)} bidders"]
     for name, rows in bidders.items():
         missing = sorted({r["line"] for r in boq} - {r["line"] for r in rows}, key=lambda x: (len(x), x))
         out.append(f"  {name}: {len(rows)} of {len(boq)} lines priced"
                    + (f" (not priced: {', '.join(missing)})" if missing else ""))
     return "\n".join(out)
-
-
-def requirements(package):
-    """The tender's required documents, as the report lists them."""
-    return [{"ref": str(d["ref"]), "document": d["document"], "rule": " ".join(d["rule"].split())}
-            for d in package.get("documents", [])]
-
-
-def document_checks(package, where=None):
-    """Documents a bidder did not submit, that expire before the date the tender requires, or that miss years.
-    Checked as the committee recorded them: FairPrice cannot tell whether a certificate is genuine."""
-    found = []
-    for i, d in enumerate(package.get("documents", [])):
-        kind, need = rule_of(d["rule"])
-        for b, v in d["bidders"].items():
-            got = value_of(kind, v)
-            data = {"ref": str(d["ref"]), "document": d["document"]}
-            at = locate(["documents", i, "bidders", b], where or {})
-            if got is False:
-                found.append({"check": "document_missing", "bidder": b, "line": None, "where": at, "data": data})
-            elif kind == "valid" and got < need:
-                found.append({"check": "document_expired", "bidder": b, "line": None, "where": at,
-                              "data": {**data, "valid_until": got.isoformat(), "needed": need.isoformat()}})
-            elif kind == "covers" and (missing := sorted(need - got)):
-                found.append({"check": "document_years", "bidder": b, "line": None, "where": at,
-                              "data": {**data, "covers": str(v), "missing": missing,
-                                       "needed": f"{min(need)}–{max(need)}" if len(need) > 1 else str(min(need))}})
-    return found
 
 
 def package_lines(boq, bidders):
@@ -483,16 +358,15 @@ async def run(args):
     except PackageError as e:
         raise SystemExit(str(e))
     boq, bidders = unpack(package, where)
-    print(describe(args.sheet, boq, bidders, package.get("documents")))
+    print(describe(args.sheet, boq, bidders))
     lines = package_lines(boq, bidders)
-    checks = document_checks(package, where) + file_checks(boq, bidders)  # each with its sheet and row
+    checks = file_checks(boq, bidders)  # each with its sheet and row
     names = list(bidders)
     base = server.review_request(args.currency, args.year, args.country)
     if base is None:
         raise SystemExit(server.NOT_LOADED.format(args.country.upper()))
-    request = {**base, "documents": requirements(package)} if package.get("documents") else base
     run_id = args.resume if args.resume and get_run(args.resume) else start_run(
-        "package", Path(args.sheet).name, request, lines, names, checks)
+        "package", Path(args.sheet).name, base, lines, names, checks)
     print(f"Review {run_id} | model {agent.MODEL} | {len(lines)} lines, {len(bidders)} bidders")
     agent.audit(run_id, event="run_started", sheet=str(args.sheet), bidders=names, lines=len(lines),
                 file_checks=checks, model=agent.MODEL)
@@ -505,7 +379,7 @@ async def run(args):
         states = await analyse(graph, lines, base, run_id, usage=usage)
         attempt = 0
         while True:
-            decision = await agent.gate(run_id, tools, report.summary(lines, states, names, checks, request), usage,
+            decision = await agent.gate(run_id, tools, report.summary(lines, states, names, checks, base), usage,
                                         ask_lines=which_lines)
             if decision["action"] != "revise":
                 break
