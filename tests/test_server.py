@@ -185,3 +185,19 @@ def test_the_currency_defaults_to_the_countrys():
     assert "is not loaded" in server.start_package_review({"boq": [{"line": "1", "item": "x", "quantity": 1}],
                                                            "bids": [{"bidder": "A", "lines": [{"line": "1", "unit_price": 1}]}]},
                                                           country="ZZ")["error"]
+
+
+def test_the_briefs_named_data_problems_are_handled_openly():
+    """Extreme values, values of zero or below 1, and missing buyer names, as published in the synthetic data."""
+    chair = lambda name: by_desc(f"Office chair ergonomic {name}")
+    flags = {r["description"]: r["flags"] for r in server.search(["office chair"], "NG", limit=50)["results"]}
+    assert flags["Office chair ergonomic damaged"] == ["value_zero_or_negative"]
+    assert flags["Office chair ergonomic spare"] == ["price_below_one"]
+    band = server.price_band(50e3, "NGN", 2024, [chair(n) for n in (0, 1, 2, 3, 4, 5, "deluxe", "damaged")])
+    reasons = {e["id"]: e["reason"] for e in band["excluded"]}
+    assert reasons[chair("deluxe")].startswith("extreme_value:9") and reasons[chair("damaged")] == "value_zero_or_negative"
+    assert band["band"]["n"] == 6 and band["assessment"] == "within_band"  # the typing error did not move the median
+    buyers = {r["description"]: r["buyer"] for r in server.rows(
+        "SELECT description, buyer FROM lines WHERE description LIKE 'Office chair ergonomic _'")}
+    assert buyers["Office chair ergonomic 0"] == "FEDERAL MINISTRY OF WORKS"  # recovered from the procuring entity
+    assert buyers["Office chair ergonomic 5"] is None  # named nowhere in the record

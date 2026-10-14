@@ -43,7 +43,12 @@ ITEMS_SHARE = 0.5  # ponytail: a reading is chosen when at least half the public
 
 TABLES_SQL = """
 CREATE OR REPLACE TABLE release_info AS  -- the few fields lines need, so joins never carry the full documents
-SELECT source, country, release_id, ocid, doc->>'$.buyer.name' AS buyer FROM releases;
+SELECT source, country, release_id, ocid,
+       coalesce(nullif(trim(doc->>'$.buyer.name'), ''),  -- some publishers leave buyer.name empty and name
+                nullif(trim(doc->>'$.tender.procuringEntity.name'), ''),  -- the buyer elsewhere in the record
+                (SELECT nullif(trim(p->>'$.name'), '') FROM unnest(CAST(doc->'$.parties' AS JSON[])) AS t(p)
+                 WHERE (p->>'$.roles') LIKE '%"buyer"%' OR (p->>'$.roles') LIKE '%"procuringEntity"%' LIMIT 1)) AS buyer
+FROM releases;
 
 CREATE OR REPLACE TABLE awards AS
 SELECT r.source, r.country, r.release_id, a->>'$.id' AS award_id,

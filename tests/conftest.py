@@ -38,8 +38,9 @@ SOURCE = TMP / "registry"  # the "downloads" the mocked registry serves
 
 # ---------------------------------------------------------------- synthetic publications
 
-def release(prefix, n, buyer, date, award=None, contract=None):
-    doc = {"ocid": f"{prefix}-{n:04d}", "id": f"{prefix}-{n:04d}-r1", "date": date, "buyer": {"name": buyer}}
+def release(prefix, n, buyer, date, award=None, contract=None, extra=None):
+    doc = {"ocid": f"{prefix}-{n:04d}", "id": f"{prefix}-{n:04d}-r1", "date": date, "buyer": {"name": buyer},
+           **(extra or {})}
     if award:
         doc["awards"] = [award]
     if contract:
@@ -51,7 +52,7 @@ def nigeria():
     """Single-item contracts with quantities (read per contract), plus the traps the agent must handle."""
     docs, n = [], 0
 
-    def add(description, qty, amount, year, buyer="FEDERAL MINISTRY OF WORKS", items=None):
+    def add(description, qty, amount, year, buyer="FEDERAL MINISTRY OF WORKS", items=None, entity=None):
         nonlocal n
         n += 1
         items = items or [{"id": "1", "description": description, "quantity": qty}]
@@ -59,7 +60,8 @@ def nigeria():
                  "value": {"amount": amount, "currency": "NGN"}, "suppliers": [{"name": "Supplier Ltd"}]}
         contract = {"id": f"c{n}", "awardID": f"a{n}", "title": description, "dateSigned": f"{year}-05-02T00:00:00Z",
                     "value": {"amount": amount, "currency": "NGN"}, "items": items}
-        docs.append(release("ocds-tstng1", n, buyer, f"{year}-05-01T00:00:00Z", award, contract))
+        docs.append(release("ocds-tstng1", n, buyer, f"{year}-05-01T00:00:00Z", award, contract,
+                            {"tender": {"procuringEntity": {"name": entity}}} if entity else None))
 
     for i, (price, year) in enumerate([(80e6, 2024), (85e6, 2024), (88e6, 2023), (90e6, 2023), (92e6, 2022),
                                        (95e6, 2022), (100e6, 2021)]):
@@ -72,6 +74,13 @@ def nigeria():
         items=[{"id": "1", "description": "Laptop", "quantity": 5}, {"id": "2", "description": "Printer", "quantity": 2}])
     for i, price in enumerate([2.0e6, 2.2e6]):
         add(f"Laptop computer core i5 batch {i}", 10, price * 10, 2024)
+    # the brief's named problems: an extreme value, values of zero and below 1, and missing buyer names
+    for i, price in enumerate([50e3, 52e3, 48e3, 51e3, 49e3, 50.5e3]):
+        add(f"Office chair ergonomic {i}", 10, price * 10, 2024, buyer="" if i in (0, 5) else "FEDERAL MINISTRY OF WORKS",
+            entity="FEDERAL MINISTRY OF WORKS" if i == 0 else None)  # chair 0 names its buyer elsewhere; 5 nowhere
+    add("Office chair ergonomic deluxe", 1, 5e6, 2024)  # 100 times the others: a typing error
+    add("Office chair ergonomic damaged", 10, 0, 2024)  # a value of zero
+    add("Office chair ergonomic spare", 1e6, 500, 2024)  # a price per item below 1
     return docs
 
 

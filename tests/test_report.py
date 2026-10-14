@@ -52,6 +52,19 @@ def test_money_and_ranges():
     assert report.ranges([5, 1, 2, 3]) == "1–3, 5" and report.ranges([]) == ""
 
 
+def test_a_source_with_no_buyer_and_an_extreme_value_in_plain_words():
+    chairs = ids("SELECT id FROM lines WHERE description LIKE 'Office chair ergonomic%' ORDER BY id")
+    run = db.start_run("item", "chairs", BASE, [{"line": "1", "item": "Office chair", "quantity": None,
+                                                 "prices": {"Price under review": 50e3}}], ["Price under review"])
+    checked(run, "1", chairs)
+    record, lines, states = server.review(run)
+    data = report.build("chairs", lines, states, record.bidders, None, BASE, run)
+    assert "(buyer not published)" in {s["bought_by"] for s in data["sources"]}
+    assert report.plain_reason("extreme_value:99") == ("an extreme value: 99× the median of the other comparable records "
+                                                        "(a typing error, or a total entered as a price per item)")
+    assert report.plain_reason("value_zero_or_negative") == "the published value is zero or negative, an entry error"
+
+
 def test_plain_reasons():
     assert report.plain_reason("Challenger: a bundle") == "Second check: a bundle"
     assert report.plain_reason("invalid_date:2001, multi_item_contract") == (

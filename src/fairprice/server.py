@@ -48,6 +48,7 @@ DB = ROOT / os.environ.get("FAIRPRICE_DB", "data/fairprice.duckdb")  # relative 
 FIRST_VALID_YEAR = 2015  # NOCOPO uses 2001-01-01 as a placeholder date
 MIN_COMPARABLES = 5
 FLAG_RATIO = 1.5  # ponytail: fixed threshold; make it a parameter if a buyer's policy differs
+EXTREME = 10  # ponytail: a price this many times from the band's median is a data error, not a market price
 
 PUBLIC_URL = os.environ.get("FAIRPRICE_PUBLIC_URL", "http://127.0.0.1:8000").rstrip("/")  # where people reach it
 SECRET = os.environ.get("FAIRPRICE_SECRET") or secrets.token_hex(16)  # signs report download links
@@ -121,8 +122,12 @@ def data_flags(r):
         flags.append("test_record")
     if r["n_items"] and r["n_items"] > 1:
         flags.append("multi_item_contract")
-    if r["unit_price"] is None:
+    if r.get("amount") is not None and r["amount"] <= 0:  # published values of zero or below: an entry error
+        flags.append("value_zero_or_negative")
+    elif r["unit_price"] is None:
         flags.append("no_quantity_published" if r.get("line_type") == "award" else "no_unit_price")
+    elif r["unit_price"] < 1:
+        flags.append("price_below_one")
     return flags
 
 
@@ -219,6 +224,13 @@ def price_band(unit_price, currency, year, candidate_ids, rejected=None):
                          "adjusted_unit_price": round(price, 2), "source": r["source"]})
     result = {"price_under_review": unit_price, "currency": currency, "year": year,
               "accepted": accepted, "excluded": excluded, "unknown_ids": unknown, "notes": sorted(notes)}
+    if len(accepted) >= 3:  # extreme values publishers left in: typing errors, totals entered as prices per item
+        middle = statistics.median(a["adjusted_unit_price"] for a in accepted)
+        for a in list(accepted):
+            ratio = a["adjusted_unit_price"] / middle
+            if ratio > EXTREME or ratio < 1 / EXTREME:
+                accepted.remove(a)
+                excluded.append({"id": a["id"], "reason": f"extreme_value:{ratio:.3g}"})
     prices = sorted(a["adjusted_unit_price"] for a in accepted)
     if len(prices) < MIN_COMPARABLES:
         result["band"] = None

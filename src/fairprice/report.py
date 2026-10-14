@@ -33,6 +33,8 @@ FLAG_TEXT = {
     "no_quantity_published": "no quantity was published, so there is no price per item",
     "duplicate of an earlier record": "a duplicate of another record of the same purchase",
     "test_record": "a test entry the portal published by mistake (buyer “Test Ministry”)",
+    "value_zero_or_negative": "the published value is zero or negative, an entry error",
+    "price_below_one": "the price per item is below 1, almost certainly an entry error",
 }
 
 
@@ -57,7 +59,10 @@ def plain_reason(reason):
         return "Second check: " + reason.removeprefix("Challenger: ")
     parts = []
     for part in reason.split(", "):
-        if part.startswith("invalid_date:"):
+        if part.startswith("extreme_value:"):
+            parts.append(f"an extreme value: {part.split(':')[1]}× the median of the other comparable records "
+                         "(a typing error, or a total entered as a price per item)")
+        elif part.startswith("invalid_date:"):
             year = part.split(":")[1]
             parts.append("the date is missing or a placeholder" + (f" ({year})" if year != "None" else ""))
         else:
@@ -190,7 +195,7 @@ def build(title, lines, states, bidders, checks, base, run_id, model=""):
                              if b in k["bidder"].split(", ") and entry["line"] in str(k["line"]).split(", ")]})
     adjusted = {r["id"]: r["adjusted_unit_price"] for st in states.values()
                 for r in ((st or {}).get("final") or {}).get("accepted", [])}
-    srcs = [{"ref": n, "bought_by": (info[i]["buyer"] or "").title(), "year": info[i]["year"],
+    srcs = [{"ref": n, "bought_by": (info[i]["buyer"] or "").title() or "(buyer not published)", "year": info[i]["year"],
              "what_was_bought": info[i]["description"], "quantity": info[i]["quantity"],
              "paid_per_item": info[i]["unit_price"], "currency": info[i]["currency"],
              "adjusted_price": round(adjusted[i], 2) if i in adjusted else None,
