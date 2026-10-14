@@ -78,6 +78,37 @@ Where each part of agent behaviour lives, and the eval round that showed why it 
 
 **Human approval in the tools themselves.** `write_price_review(run_id, approval)` and `add_country(code, approval)` are the two tools that change something, and neither runs on an AI's say-so. Without an `approval`, each records a pending request in the `approvals` table and replies with `fairprice --approve <id>`, which a person runs in the terminal: it shows what is asked, takes the person's decision and name, and carries the action out. In FairPrice's own runs, choosing approve at the gate menu is that decision. An approval is single-use and tied to one action and one target (a version of a run, or a country code), and the approver's name comes from the approval, never from the caller. A rejected or replaced draft cancels its pending request. `get_price_review` reads the `reports` table and returns the report as JSON, whatever its file format and wherever its files are stored.
 
+## Data
+
+`fairprice-ingest` downloads OCDS publications from the OCP Data Registry, loads the raw JSON into DuckDB unchanged (`releases`), and flattens them into one `lines` table. It also fetches the World Bank consumer price index (`FP.CPI.TOTL`) and exchange rates (`PA.NUS.FCRF`) for every loaded country. After that, the agent runs offline.
+
+**Adding a country** (`fairprice-ingest --add RW`, or the MCP tool `add_country`) loads every publication the country has on the registry. The registry has no API, so the ingest reads its search page, where each publication has a flag image named with its ISO country code, a "Country: Publisher" title and an id. A country's publications are downloaded unchanged and joined end to end into one file per country (`data/raw/nigeria.jsonl.gz`); joined gzip files read back as one. `data/raw/manifest.json` records which publications each file holds and in what order, so a rebuild needs no network. Records are told apart by their OCID prefix, which each publisher registers once (`ocds-gyl66f` is the federal BPP, `ocds-zinqhl` is Ebonyi State). The `sources` table records each publication's registry title (used as "Published by" in reports), its currency (the most common currency in its awards), and how it is read:
+
+- **item_prices**: at least half the contract items carry a unit price (Rwanda). One line per priced item.
+- **items**: at least half the contracts list an item quantity (Nigeria). One line per contract, priced when it has one item.
+- **awards**: neither (Kenya). One line per award, with no unit price.
+
+**Stable record ids:** each publication's lines get one block of ids, numbered after the publications already loaded, in the order they were added. The eval cases refer to records by id, so adding Ghana must not renumber Nigeria. We checked that rebuilding Nigeria and Kenya with this code reproduces all 126,281 records with the same ids. Ids still change if a publication's own data changes when it is downloaded again.
+
+| Source | Records | What it can support |
+|---|---|---|
+| Nigeria, Bureau of Public Procurement (NOCOPO), 2021-2026 | 98,866 processes, 17,044 contracts, 12,526 with a unit price | Unit prices: contract value / item quantity, single-item contracts only |
+| Kenya, PPRA (PPIP), 2018-2026 | 260,744 processes, 109,237 awards | Award totals only. Kenya publishes no items or quantities, so it cannot give unit prices. |
+| Nigeria, 11 state portals and Budeshi | 2,396 records | 1,322 with a unit price (Ebonyi, Enugu, Osun, Abia, Anambra); the rest publish no quantities |
+| Kenya, Makueni County | 728 awards | Award totals only |
+
+**Which half we built on:** the real-data half, meaning award history and prices. The portals publish no bid documents, so FairPrice benchmarks prices under review. It reads bidders' price schedules (spreadsheets), not full bid documents, and the bid packages in our examples and evals are synthetic.
+
+## Messy data
+
+The brief says the data will not be cleaned for us, and that handling it is most of criterion one. FairPrice uses the data as published and handles each problem in code, with a reason the committee can read. The table of problems, how often each occurs in the Nigerian and Kenyan data, and what FairPrice does is in the README: [Data quality](README.md#data-quality-what-the-published-data-gets-wrong-and-what-fairprice-does). In code: `server.data_flags` (record flags), `server.price_band` (duplicates, extreme values, inflation and currency), `ingest.TABLES_SQL` (buyer names).
+
+
+
+## Models
+
+The default is **Gemma 4** (open weights, 8B) through Ollama, run locally with thinking mode off and a 4,096-token output cap. We started with Qwen3 8B, as planned, but switched after the evals. On the same code, Gemma 4 passed 17 of 18 single-item runs at about 2 minutes each. Qwen3 8B passed 12 of 18, kept letting bundles into the band, and averaged 6 minutes per run. On the latest code (round 7), Gemma 4 passes 16 of 18 single-item runs and 2 of 2 bid-package runs; the two failures kept a Prado-and-Hilux bundle in the band with the right verdict (EVALS.md). With thinking on, at temperature 0, Qwen3 once looped for over an hour before its first tool call. Any model that `langchain.init_chat_model` supports can be swapped in with `FAIRPRICE_MODEL`.
+
 ## Audit
 
 Every MCP tool call on both servers passes through one interceptor, which prints it on screen and adds a row to the `audit_log` table with inputs, outputs, timing and run id. Human decisions (including the approver's name) and run starts and finishes are logged the same way, and the run's own steps are in `run_steps`. `uv run fairprice --audit <run id>` prints a run's log in time order.

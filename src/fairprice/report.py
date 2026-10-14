@@ -200,7 +200,7 @@ def build(title, lines, states, bidders, checks, base, run_id, model=""):
              "paid_per_item": info[i]["unit_price"], "currency": info[i]["currency"],
              "adjusted_price": round(adjusted[i], 2) if i in adjusted else None,
              "published_by": info[i]["publisher"], "ocid": info[i]["ocid"], "contract_id": info[i]["line_id"],
-             "dataset": info[i]["source"], "record_id": i} for i, n in refs.items()]
+             "dataset": info[i]["source"], "used": used(i, states), "record_id": i} for i, n in refs.items()]
     how = [{"line": e["line"], "item": e["item"],
             "plan": (states.get(e["line"]) or {}).get("plan"),
             "searches": (states.get(e["line"]) or {}).get("searches", []),
@@ -215,6 +215,17 @@ def build(title, lines, states, bidders, checks, base, run_id, model=""):
                        "currency": cur, "prices_in_year": year, "country": base["country"],
                        "bid_file_checks": [check_text(k, cur) for k in checks] if checks is not None else None},
             "prices": prices, "sources": srcs, "lines": how}
+
+
+def used(record, states):
+    """"Yes", or "No: <why>" for a record a price check left out (a flag, the Analyst's or the second check's reason)."""
+    for st in states.values():
+        final = (st or {}).get("final") or {}
+        if any(r["id"] == record for r in final.get("accepted", [])):
+            return "Yes"
+    reasons = [e["reason"] for st in states.values() for e in ((st or {}).get("final") or {}).get("excluded", [])
+               if e["id"] == record]
+    return f"No: {plain_reason(reasons[0])}" if reasons else "No"
 
 
 def status_line(data):
@@ -239,6 +250,7 @@ def headings(data):
             "quantity": "Quantity", "paid_per_item": "Paid per item", "currency": "Currency",
             "adjusted_price": f"In {year} money ({cur})", "published_by": "Published by",
             "ocid": "Official record (OCID)", "contract_id": "Contract ID", "dataset": "Dataset",
+            "used": "Used in the comparison",
             "record_id": "FairPrice audit ID"}
     flat = lambda k, v: (ranges(v) if k == "sources" else " ".join(v) if k == "problems"
                          else f"L{v}" if k == "record_id"
@@ -303,7 +315,7 @@ def workbook(data, prices, srcs):
     for row, r in enumerate(data["prices"], 2):
         if fill := fills.get(r["result"]):
             ws.cell(row, 8).fill = PatternFill("solid", fgColor=fill)
-    table(wb.create_sheet("Sources"), srcs, (6, 28, 7, 60, 9, 15, 9, 16, 30, 30, 12, 40, 14), status,
+    table(wb.create_sheet("Sources"), srcs, (6, 28, 7, 60, 9, 15, 9, 16, 30, 30, 12, 40, 50, 14), status,
           {"Paid per item": money_fmt, f"In {year} money ({cur})": money_fmt})
     out = io.BytesIO()
     wb.save(out)

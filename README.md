@@ -409,10 +409,30 @@ Whether a country can give prices per item depends on what it publishes. FairPri
 
 ## Data and its limits
 
+- **We built on the real-data half.** The price benchmarks come from real published awards. Bid evaluation needs documents nobody publishes (bids, price schedules, tender files), so the bid packages in the examples and evals are synthetic and labelled as such. FairPrice reads price schedules, not full bid documents.
 - **Nigeria** (federal BPP and its states) and **Kenya** (PPRA and Makueni County) are loaded by default, and the evals use them. Other countries can be added as above.
-- **We built on the real-data half.** The price benchmarks come from real published awards. Portals publish awards, not bids, so the bid packages in the examples and evals are synthetic. FairPrice reads price schedules, not full bid documents (PDFs, certificates).
-- Data is used as published. The agent handles placeholder dates, lot prices, bundles and duplicates; it does not clean the source.
-- No live tenders and no personal data. Reports show buying agencies, not supplier names.
+- No live tenders and no personal data. Reports show buying agencies, never supplier names.
+
+## Data quality: what the published data gets wrong, and what FairPrice does
+
+The data is used as published, never cleaned. Each problem is handled in code and, where it removes a record from a comparison, the report says why in plain words. Counts are from the loaded Nigerian (19,440 records, 13,848 with a price per item) and Kenyan (109,965 records) data.
+
+| Problem | How often | What FairPrice does |
+|---|---|---|
+| **Extreme values** (named in the brief) | A Nigerian warehouse published at **₦1,004,166,666,735** (₦1 trillion); a Kenyan school road at **KES 160.6 billion**; 6 values above 100 billion. | In each price range, a record more than **10 times** above or below the median of the others is left out: "an extreme value: 99× the median of the other comparable records (a typing error, or a total entered as a price per item)". The range is built on the median and quartiles, which one bad value cannot move. |
+| **Values of zero or below** | 301 Nigerian, 1,154 Kenyan | Flagged as an entry error and never used. |
+| **A price per item below 1** | 4 Nigerian | Flagged as an entry error and never used. |
+| **Supplier identifiers that break their own scheme** (named in the brief) | Of 30,038 Nigerian suppliers on awards, 2,488 have the identifier `NG-BPP-` with nothing after the scheme prefix, 811 have none, and 11,115 do not follow the scheme at all. Kenya's 80,671 are bare numbers with no scheme. | **Not used, by design.** No comparison, duplicate check or report depends on a supplier identifier, and reports never name suppliers, so a broken identifier cannot produce a wrong finding about a company. Duplicates are found by buyer, description and price instead. |
+| **Missing buyer names** (named in the brief) | 10,905 Nigerian releases leave `buyer.name` empty | The ingest takes the name from the procuring entity or the record's parties when `buyer.name` is empty; 9 priced records still have none and show "(buyer not published)". Nothing else depends on the name. |
+| Missing quantities | All Kenyan awards (108,811); 1,487 Nigerian | No price per item is computed, never estimated. Kenya can be searched but gives "No comparison possible". Tested by `kenya-no-quantities`. |
+| Missing or placeholder dates (NOCOPO uses 2001-01-01) | 2,045 Nigerian, 14,918 Kenyan | Flagged and left out: prices cannot be adjusted for inflation without a year. Tested by `placeholder-dates`. |
+| Test entries published as real awards | 180 Nigerian, from buyer "TEST MINISTRY - NOCOPO" | Flagged and left out. Found when one appeared in a laptop price range. |
+| Duplicates (same buyer, description and price) | 914 Nigerian | Only the first is used. |
+| Contracts for several different items | 3,835 Nigerian | No price per item can be assigned to one item, so they are left out. |
+| Bundles and lot prices ("2 Hilux and 1 Prado") | Common; not countable by code | The Analyst rejects them with a reason, and the Challenger looks for the ones it missed. The one failure we still see (EVALS.md). |
+| Prices from different years and currencies | Nigerian consumer prices rose more than 5× between 2015 and 2025 | Every price is adjusted with World Bank inflation and exchange rates to the year and currency under review. |
+
+Every exclusion is listed in the report's Sources sheet with its reason, so a committee member can check what was left out and why.
 
 ## Honest status
 

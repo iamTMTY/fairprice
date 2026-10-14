@@ -726,7 +726,8 @@ def pending_request(request_id):
     r = draft.data["report"]
     return row, {"request": row.id, "action": row.action, "target": target, "title": r["title"],
                  "summary": f"Approve the price review {target}: {r['title']}, {len(draft.data['prices'])} prices, "
-                            f"{len(draft.data['sources'])} sources.",
+                            f"{sum(s['used'] == 'Yes' for s in draft.data['sources'])} past purchases compared, "
+                            f"{sum(s['used'] != 'Yes' for s in draft.data['sources'])} left out with reasons.",
                  "files": [link(f) for f in draft.files]}
 
 

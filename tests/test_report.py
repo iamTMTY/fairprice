@@ -60,6 +60,11 @@ def test_a_source_with_no_buyer_and_an_extreme_value_in_plain_words():
     record, lines, states = server.review(run)
     data = report.build("chairs", lines, states, record.bidders, None, BASE, run)
     assert "(buyer not published)" in {s["bought_by"] for s in data["sources"]}
+    used = {s["what_was_bought"]: s["used"] for s in data["sources"]}
+    assert used["Office chair ergonomic 1"] == "Yes"
+    assert used["Office chair ergonomic deluxe"].startswith("No: an extreme value: ")
+    assert used["Office chair ergonomic damaged"] == "No: the published value is zero or negative, an entry error"
+    assert report.headings(data)[1][0]["Used in the comparison"] in ("Yes", used[data["sources"][0]["what_was_bought"]])
     assert report.plain_reason("extreme_value:99") == ("an extreme value: 99× the median of the other comparable records "
                                                         "(a typing error, or a total entered as a price per item)")
     assert report.plain_reason("value_zero_or_negative") == "the published value is zero or negative, an entry error"
