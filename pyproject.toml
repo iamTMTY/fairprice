@@ -24,6 +24,7 @@ dependencies = [
 [project.scripts]
 fairprice = "fairprice.agent:main"
 fairprice-ingest = "fairprice.ingest:main"
+fairprice-server = "fairprice.server:main"
 fairprice-evals = "fairprice.evals:main"
 
 [project.optional-dependencies]

@@ -1,14 +1,13 @@
 # FairPrice
 
-An agent that prepares sourced price evidence for a public tender evaluation committee. Give it one item and a price, or a whole bid package (every bidder's price schedule for one procurement). For each line it:
+An MCP server, with its own agent, that prepares sourced evidence for a public tender evaluation committee. Give it one item and a price, or a whole tender: its bill of quantities, its required documents and every bidder's price schedule. It:
 
-1. finds comparable past awards in published Open Contracting data;
-2. rejects records that are not truly comparable;
-3. adjusts prices for inflation;
-4. has a second agent try to disprove the result;
-5. checks the bid files for arithmetic errors, missing lines and changed quantities.
+1. ticks off each bidder's documents: missing, expired, or missing years;
+2. checks each bid file for arithmetic errors, missing lines and changed quantities;
+3. for each line, finds comparable past awards in published Open Contracting data, rejects records that are not truly comparable, adjusts prices for inflation, and has a second agent try to disprove the result;
+4. drafts a report in which every number comes from a tool and every record is cited, and waits for a named officer to approve it.
 
-It then drafts a report in which every number comes from a tool and every record is cited, and waits for a named officer to approve it.
+**The product is the MCP server** (`fairprice-server`). It runs on one computer for one person, or as a web server that procurement systems and other AI apps connect to with access keys, each organisation seeing only its own reviews. The `fairprice` command line is one client of it.
 
 **FairPrice never totals, ranks or recommends bidders, and never decides an award.** The committee does.
 
@@ -286,38 +285,81 @@ With S3 storage, the draft and approved reports are shown as download links that
 
 **Where reports may go:** Reports can contain bidders' prices from an evaluation in progress, which are commercially confidential. Keep them inside your own organisation and jurisdiction: on this computer (the default), or in object storage you run yourself, such as MinIO on your own servers. Use a cloud provider only if your procurement and data rules allow it.
 
-## Use it from another AI app (MCP)
+## The MCP server: connect other tools
 
-`src/fairprice/server.py` is a standard MCP server. Any MCP client can start it with:
+### Tools
+
+| Tool | What it does |
+|---|---|
+| `start_review(item, unit_price, currency, year, country)` | Starts a review of one price; returns its `run_id`. The currency defaults to the country's. |
+| `start_package_review(package \| file + filename, title, currency, year, country)` | Starts a review of a whole tender: the package as JSON, **or the workbook itself** (`file` is its contents in base64, `filename` ends in .xlsx, .csv or .json). Documents and bid files are checked at once; problems come back with their sheet and row. |
+| `plan_searches(run_id, searches, notes, line)` | Records the search plan for a line |
+| `find_comparables(run_id, keywords, line, year_from, year_to, limit)` | Searches past awards in the review's country; every word must match, in any order |
+| `check_price_comparability(run_id, candidate_ids, rejected, line)` | The band and the verdict. Only records the review's own searches found count; the price, currency and year come from the review. |
+| `challenge_review(run_id, verdict, reason, objections, line)` | Records a second, independent check of a line |
+| `review_with_fairprice(run_id)` | **For apps that do not reason themselves** (a procurement portal): FairPrice's own agent reviews every line in the background and drafts the report |
+| `review_status(run_id)` | Progress of that review; when done, the summary, the draft and the approval request |
+| `write_price_review(run_id, approval, format)` | Without approval: the draft report and a request for a person. With a person's approval: the final report. `format`: xlsx, csv or json. |
+| `get_price_review(run_id)` | An approved report as JSON, with links to its files; without a run_id, the list |
+| `list_countries()`, `add_country(code, approval)` | The countries with data, and loading one (needs a person's approval) |
+
+| Resource | What it is |
+|---|---|
+| `fairprice://bid-package/schema` | The tender format (JSON Schema): BoQ, documents, bids |
+| `fairprice://bid-package/example` | A complete example tender |
+| `fairprice://bid-package/template.xlsx` | A blank tender workbook (also at `/template.xlsx` on a web server) |
+| `ocds://line/{id}` | The published record behind a cited source |
+
+An app either does the reasoning itself (plan, search, check, challenge, then `write_price_review`), or hands the run to `review_with_fairprice` and follows `review_status`. Either way **it never sends a report, a price or a source list to be saved**: reports are built only from what the review's own tool calls recorded.
+
+### On one computer (stdio)
 
 ```bash
-uv run --directory /path/to/FairPrice python -m fairprice.server
+uv run --directory /path/to/FairPrice fairprice-server
 ```
 
-A review is one **run** that links all the tool calls. The other app does what FairPrice's own agent does:
+Any MCP client (Claude Desktop, an IDE, your own app) can start it this way. There are no keys: everything belongs to this computer.
 
-1. `start_review(item, unit_price, currency, year, country)` → a `run_id` (or `start_package_review(package, …)` for a whole bid package); the currency defaults to the country's;
-2. `plan_searches(run_id, searches)`: the keyword sets it will try, most specific first;
-3. `find_comparables(run_id, keywords)`: past awards in the run's country; every word must match, in any order;
-4. `check_price_comparability(run_id, candidate_ids, rejected)`: the band and the verdict. Only records the run's own searches found are accepted; the price, currency and year come from the run;
-5. `challenge_review(run_id, verdict, reason, objections)`: an optional second check, shown in the report;
-6. `write_price_review(run_id)`: a draft report, built only from what the run recorded, and a request for a person to approve it;
-7. after a person approves, `write_price_review(run_id, approval)` writes the final report, and `get_price_review(run_id)` returns it as JSON.
+### As a web server (HTTP)
 
-Packages use the same tools with `line="<BoQ line>"`. The app never sends a report, a price or a source list to be saved, so it cannot put anything in a report that its run did not find. FairPrice's Challenger agent and self-check are not part of the server; another app brings its own reasoning, and the tools keep the evidence honest. `list_countries` and `add_country` manage the data.
+```bash
+export FAIRPRICE_PUBLIC_URL=https://fairprice.example.org      # where people and apps reach it
+export FAIRPRICE_SECRET=<a long random string>                   # signs report download links
+uv run fairprice-server --add-key ministry-of-works --role app --name "e-GP portal"
+uv run fairprice-server --add-key ministry-of-works --role approver --name "Ada Obi"
+uv run fairprice-server --http --host 0.0.0.0 --port 8000
+```
 
-**An AI app can never approve a report or add a country by itself.** When it calls `write_price_review` or `add_country`, the tool only records a request and replies with a command for a person to run:
+- **MCP at `/mcp`** (streamable HTTP). Every call needs `Authorization: Bearer <app key>`. A key belongs to one organisation, and a caller sees only its own organisation's reviews, reports and approval requests.
+- **Two kinds of key.** An *app* key calls the tools. An *approver* key belongs to a named officer and can only approve. **So an AI app's key can never approve anything, and the name on an approved report is always the officer's**, taken from their key.
+- **Approvals at `/approve`**: the officer enters their key and the request, sees what is asked with links to the draft, and approves or rejects. Software they use (FairPrice's CLI) can do the same through `/api/approvals`.
+- **Report files** come back as signed links that work for one hour (or S3's own links with `FAIRPRICE_STORAGE=s3`).
+- **Every tool call is audited by the server**, whoever makes it: inputs, output, time, organisation and caller, in the `audit_log` table. Human decisions are logged with the officer's name.
+- Keys are stored as hashes; the secret is shown once. Revoke one with `--revoke-key <id>`. Put the server behind HTTPS (a reverse proxy) when it leaves your own network. For several servers, point `FAIRPRICE_SQL_URL` at Postgres.
+- **Bid prices are confidential.** Run the server inside the procuring organisation or its government's own data centre.
+
+### The CLI as a client of a web server
+
+```bash
+export FAIRPRICE_SERVER_URL=https://fairprice.example.org FAIRPRICE_API_KEY=<app key>
+uv run fairprice --package tender.xlsx --year 2025     # uploads the workbook; the server's agent reviews it
+FAIRPRICE_APPROVER_KEY=<approver key> uv run fairprice --approve <request>
+```
+
+### Approving on one computer
+
+**An AI app can never approve a report or add a country by itself.** On one computer, a person decides in the terminal:
 
 ```
 $ uv run fairprice --approve              # list the requests waiting
 $ uv run fairprice --approve 3f9a1c2b7d10e4a5
-An AI app asks to approve the price review 36daf9b9af36: laptop computer, 1 prices, 12 sources.
+An AI app asks: Approve the price review 36daf9b9af36: laptop computer, 1 prices, 12 sources.
 Decision (↑/↓ and Enter, or press a number)
 ❯ 1. approve  carry it out now, under your name
   2. reject   refuse it
 ```
 
-The person sees what they are approving, chooses, and gives their name; the report is approved under that name, never a name the app supplied. Each approval works once, for that version of that review (if the review changes after the draft, the app must draft again) or that country, and is recorded in the `approvals` table and the audit log. Inside FairPrice's own runs, the approval menu at the end of a run is that person.
+Each approval works once, for that version of that review (if the review changes after the draft, the app must draft again) or that country, and is recorded in the `approvals` table and the audit log. Inside FairPrice's own runs, the approval menu at the end of a run is that person.
 
 ## If something goes wrong
 
@@ -356,7 +398,7 @@ Created when you run it (not in the repo): `data/` (downloads, database, run sta
 uv run pytest --cov
 ```
 
-92 tests, 99% line and branch coverage, about 30 seconds, and no model or network needed. They run against a small synthetic dataset built through the real ingest (registry, downloads and World Bank mocked): a Nigeria-style publication with item quantities and the traps the agent must handle (a bundle, a placeholder date, a test record, a duplicate, a multi-item contract), a Kenya-style one with award totals only, and a Rwanda-style one with prices per item. A scripted model stands in for Gemma, so the agent graph, the approval gate, the CLI, the bid packages and the eval runner all run for real; one integration test starts both MCP servers as subprocesses over stdio. The tests never touch `data/`, `reports/` or your database.
+103 tests, 99% line and branch coverage, about 30 seconds, and no model or network needed. They run against a small synthetic dataset built through the real ingest (registry, downloads and World Bank mocked): a Nigeria-style publication with item quantities and the traps the agent must handle (a bundle, a placeholder date, a test record, a duplicate, a multi-item contract), a Kenya-style one with award totals only, and a Rwanda-style one with prices per item. A scripted model stands in for Gemma, so the agent graph, the approval gate, the CLI, the bid packages and the eval runner all run for real; one integration test starts both MCP servers as subprocesses over stdio, and the web tests call the server over HTTP with access keys from two organisations. The tests never touch `data/`, `reports/` or your database.
 
 The tests prove the code does what it should. They do not measure how good the model's judgement is; that is what the evals are for (EVALS.md).
 

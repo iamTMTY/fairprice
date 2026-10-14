@@ -317,6 +317,36 @@ def unpack(package, where=None):
     return boq, bidders
 
 
+def template_bytes(kind):
+    """A blank bid package (".xlsx", ".csv" or ".json") to fill in."""
+    boq = [HEADINGS[c][0] for c in BOQ_COLUMNS]
+    bid = [HEADINGS[c][0] for c in BID_COLUMNS if c != "country_of_origin"]
+    if kind == ".json":
+        return (json.dumps({"boq": [{"line": "1", "item": "", "unit": "", "quantity": 1, "budget": 0}],
+                            "documents": [{"ref": "1", "document": "", "rule": "Submitted", "bidders": {"Bidder 1": "Yes"}}],
+                            "bids": [{"bidder": "Bidder 1", "lines": [{"line": "1", "unit_price": 0}]}]},
+                           indent=2) + "\n").encode()
+    if kind == ".csv":
+        return (",".join([HEADINGS["bidder"][0], *dict.fromkeys(boq + bid)]) + "\n").encode()
+    import io
+    from openpyxl import Workbook
+    from openpyxl.comments import Comment
+    wb = Workbook()
+    wb.active.title = "BoQ"
+    wb["BoQ"].append(boq)
+    docs = wb.create_sheet("Documents")
+    docs.append(["Ref", "Document", "Rule", "Bidder 1", "Bidder 2"])
+    docs["C1"].comment = Comment("One of: Submitted / Valid on YYYY-MM-DD / Covers YYYY-YYYY", "FairPrice")
+    docs["D1"].comment = Comment("One column per bidder, named exactly as the bidder's sheet. Write Yes or No; for "
+                                 "Valid on, the date the document is valid until; for Covers, the years it covers "
+                                 "(such as 2022-2024).", "FairPrice")
+    for name in ("Bidder 1", "Bidder 2"):
+        wb.create_sheet(name).append(bid)
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
+
+
 def template(path):
     """Write a blank bid package to fill in; returns what to do next. Never overwrites a file."""
     path, kind = Path(path), Path(path).suffix.lower()
@@ -324,31 +354,7 @@ def template(path):
         raise SystemExit(f"use .xlsx, .csv or .json, not {kind or 'no extension'}")
     if path.exists():
         raise SystemExit(f"{path} already exists; choose another name")
-    boq = [HEADINGS[c][0] for c in BOQ_COLUMNS]
-    bid = [HEADINGS[c][0] for c in BID_COLUMNS if c != "country_of_origin"]
-    if kind == ".json":
-        path.write_text(json.dumps({"boq": [{"line": "1", "item": "", "unit": "", "quantity": 1, "budget": 0}],
-                                    "documents": [{"ref": "1", "document": "", "rule": "Submitted",
-                                                   "bidders": {"Bidder 1": "Yes"}}],
-                                    "bids": [{"bidder": "Bidder 1", "lines": [{"line": "1", "unit_price": 0}]}]},
-                                   indent=2) + "\n")
-    elif kind == ".csv":
-        path.write_text(",".join([HEADINGS["bidder"][0], *dict.fromkeys(boq + bid)]) + "\n")
-    else:
-        from openpyxl import Workbook
-        from openpyxl.comments import Comment
-        wb = Workbook()
-        wb.active.title = "BoQ"
-        wb["BoQ"].append(boq)
-        docs = wb.create_sheet("Documents")
-        docs.append(["Ref", "Document", "Rule", "Bidder 1", "Bidder 2"])
-        docs["C1"].comment = Comment("One of: Submitted / Valid on YYYY-MM-DD / Covers YYYY-YYYY", "FairPrice")
-        docs["D1"].comment = Comment("One column per bidder, named exactly as the bidder's sheet. Write Yes or No; "
-                                     "for Valid on, the date the document is valid until; for Covers, the years "
-                                     "it covers (such as 2022-2024).", "FairPrice")
-        for name in ("Bidder 1", "Bidder 2"):
-            wb.create_sheet(name).append(bid)
-        wb.save(path)
+    path.write_bytes(template_bytes(kind))
     return (f"Wrote {path}. Fill in the BoQ"
             + (", the documents the tender requires (Documents)" if kind != ".csv" else "")
             + ", and each bidder's price schedule"

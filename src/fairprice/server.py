@@ -1,24 +1,46 @@
-"""fairprice-mcp: price-comparison tools over published OCDS award data.
+"""fairprice-mcp: the product. Tools for reviewing a tender's prices against published OCDS award data, for any
+MCP client: FairPrice's own CLI, another AI app, or a procurement system.
 
-The model decides which records describe the same product; these tools do the
-arithmetic (inflation, currency, price bands) so numbers are never invented.
+The model decides which records describe the same product; these tools do the arithmetic (inflation, currency,
+price bands) so numbers are never invented. Every call is audited here, where it runs, whoever the caller is.
+
+  fairprice-server                          stdio, for an app on this computer (no keys: organisation "local")
+  fairprice-server --http [--host --port]   a web server: MCP at /mcp, approvals at /approve; every caller needs
+                                            an access key, and sees only its own organisation's reviews
+  fairprice-server --add-key ORG --role app|approver --name NAME     (--revoke-key ID)
 """
 
+import argparse
+import base64
+import binascii
 import datetime as dt
+import functools
+import hashlib
+import hmac
+import html
+import inspect
 import json
 import os
 import re
+import secrets
 import statistics
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 import duckdb
+from mcp.server.auth.middleware.auth_context import get_access_token
+from mcp.server.auth.provider import AccessToken
+from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
 from sqlalchemy import select
+from starlette.requests import Request
+from starlette.responses import HTMLResponse, JSONResponse, Response
 
-from fairprice.db import (REPORTS, add_step, engine, get_run, request_approval, start_run, steps, supersede,
-                          use_approval)
+from fairprice.db import (CALLER, REPORTS, add_key, add_step, approvals, audit, check_key, decide, engine, get_run,
+                          org, request_approval, revoke_key, start_run, steps, supersede, use_approval)
 from fairprice.storage import storage
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -27,7 +49,57 @@ FIRST_VALID_YEAR = 2015  # NOCOPO uses 2001-01-01 as a placeholder date
 MIN_COMPARABLES = 5
 FLAG_RATIO = 1.5  # ponytail: fixed threshold; make it a parameter if a buyer's policy differs
 
-mcp = FastMCP("fairprice", log_level="WARNING")
+PUBLIC_URL = os.environ.get("FAIRPRICE_PUBLIC_URL", "http://127.0.0.1:8000").rstrip("/")  # where people reach it
+SECRET = os.environ.get("FAIRPRICE_SECRET") or secrets.token_hex(16)  # signs report download links
+
+
+class KeyVerifier:
+    """Over HTTP, only an app's access key may call the tools; an approver's key may only approve."""
+
+    async def verify_token(self, token):
+        who = check_key(token, "app")
+        return AccessToken(token=token, client_id=who["key"], scopes=[]) if who else None
+
+
+mcp = FastMCP("fairprice", log_level="WARNING", stateless_http=True, json_response=True,
+              token_verifier=KeyVerifier(),
+              auth=AuthSettings(issuer_url=PUBLIC_URL, resource_server_url=f"{PUBLIC_URL}/mcp",
+                                validate_token_resource=False))  # our keys are checked by KeyVerifier, not an issuer
+
+
+def caller():
+    """The caller of this request: an app's key over HTTP, or None on this computer (organisation "local")."""
+    token = get_access_token()
+    return check_key(token.token, "app") if token else None
+
+
+def tool(fn):
+    """An MCP tool that knows its caller and writes its own audit row: inputs, output and time."""
+    sig = inspect.signature(fn)
+
+    @functools.wraps(fn)
+    def call(*args, **kwargs):
+        who = CALLER.get() or caller()
+        token = CALLER.set(who)
+        given = sig.bind(*args, **kwargs)
+        given.apply_defaults()
+        shown = {k: f"<file, {len(v)} characters>" if k == "file" and v else v for k, v in given.arguments.items()}
+        start = time.perf_counter()
+        try:
+            out = fn(*args, **kwargs)
+        except Exception as e:
+            audit(shown.get("run_id"), server="fairprice", tool=fn.__name__, args=shown, error=repr(e),
+                  caller=(who or {}).get("name") or os.environ.get("FAIRPRICE_CALLER"))
+            raise
+        else:
+            run_id = shown.get("run_id") or (out.get("run_id") if isinstance(out, dict) else None)
+            audit(run_id, server="fairprice", tool=fn.__name__, args=shown,
+                  output=json.dumps(out, default=str, ensure_ascii=False), seconds=round(time.perf_counter() - start, 2),
+                  caller=(who or {}).get("name") or os.environ.get("FAIRPRICE_CALLER"))
+            return out
+        finally:
+            CALLER.reset(token)
+    return mcp.tool()(call)
 
 
 def db():
@@ -194,7 +266,7 @@ def quoted(entry):
     return statistics.median(prices) if prices else None
 
 
-@mcp.tool()
+@tool
 def start_review(item: str, unit_price: float, currency: str = "", year: int | None = None,
                  country: str = "NG") -> dict:
     """Start a price review of one item: what is being bought and the price quoted for it. Returns its run_id;
@@ -215,9 +287,9 @@ def start_review(item: str, unit_price: float, currency: str = "", year: int | N
             "next": "plan_searches, then find_comparables, then check_price_comparability, then write_price_review"}
 
 
-@mcp.tool()
-def start_package_review(package: dict, title: str = "bid package", currency: str = "", year: int | None = None,
-                         country: str = "NG") -> dict:
+@tool
+def start_package_review(package: dict | None = None, title: str = "", currency: str = "", year: int | None = None,
+                         country: str = "NG", file: str = "", filename: str = "") -> dict:
     """Start a review of a whole tender: its bill of quantities, its checklist of required documents and every
     bidder's price schedule, in the bid package format (bid_package.schema.json: {"boq": [{line, item, unit,
     quantity, budget}], "documents": [{ref, document, rule, bidders: {bidder: value}}], "bids": [{bidder, lines:
@@ -225,25 +297,48 @@ def start_package_review(package: dict, title: str = "bid package", currency: st
     YYYY-YYYY"; a bidder's value is Yes/No, the date the document is valid until, or the years it covers. A package
     that does not match is refused with every problem. Returns the run_id, its lines, and the problems found in the
     bid files and documents. Review each line with line="<its number>". Bidders are never totalled or ranked.
+
+    Instead of package, send the tender workbook itself: file (its contents, base64) and filename (with .xlsx, .csv
+    or .json); problems are then reported with their sheet and row. The format, an example and a blank workbook are
+    the resources fairprice://bid-package/schema, /example and /template.xlsx.
     """
     from fairprice import batch
     try:
-        package = batch.validate(json.loads(json.dumps(package)))
+        if file:
+            package, where = read_upload(file, filename)
+            title = title or Path(filename).name
+        elif package is not None:
+            package, where = batch.validate(json.loads(json.dumps(package))), {}
+        else:
+            return {"error": "Send package (the JSON) or file and filename (the workbook)."}
     except batch.PackageError as e:
         return {"error": "The package does not match the bid package format.", "problems": e.problems}
-    boq, bidders = batch.unpack(package)
-    checks = batch.document_checks(package) + batch.file_checks(boq, bidders)
+    boq, bidders = batch.unpack(package, where)
+    checks = batch.document_checks(package, where) + batch.file_checks(boq, bidders)
     lines = batch.package_lines(boq, bidders)
     if (request := review_request(currency, year, country)) is None:
         return {"error": NOT_LOADED.format(country.upper())}
     if package.get("documents"):
         request["documents"] = batch.requirements(package)
-    run_id = start_run("package", title, request, lines, list(bidders), checks)
+    run_id = start_run("package", title or "bid package", request, lines, list(bidders), checks)
     return {"run_id": run_id, "lines": lines, "bidders": list(bidders), **request,
             "bid_file_problems": len(checks)}
 
 
-@mcp.tool()
+def read_upload(file, filename):
+    """A workbook sent through MCP, read exactly as the CLI reads a file: (package, where), or PackageError."""
+    from fairprice import batch
+    try:
+        content = base64.b64decode(file, validate=True)
+    except (binascii.Error, ValueError):
+        raise batch.PackageError(filename or "file", ["file is not base64"])
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / Path(filename or "package").name
+        path.write_bytes(content)
+        return batch.load(path)
+
+
+@tool
 def plan_searches(run_id: str, searches: list[list[str]], notes: str = "", line: str = "1") -> dict:
     """Record your search plan for a line before searching: the keyword sets you will try, most specific first
     (e.g. [["hilux"], ["hilux", "pickup"], ["pickup"]]), and in notes what you will reject (bundles, other
@@ -259,7 +354,7 @@ def plan_searches(run_id: str, searches: list[list[str]], notes: str = "", line:
     return {"recorded": True, "line": str(line), "item": entry["item"], "plan": plan}
 
 
-@mcp.tool()
+@tool
 def find_comparables(run_id: str, keywords: list[str], line: str = "1", year_from: int | None = None,
                      year_to: int | None = None, limit: int = 25) -> dict:
     """Search published contract awards, in the review's country, for records whose description contains every
@@ -279,7 +374,7 @@ def find_comparables(run_id: str, keywords: list[str], line: str = "1", year_fro
     return found
 
 
-@mcp.tool()
+@tool
 def check_price_comparability(run_id: str, candidate_ids: list[int], rejected: dict[str, str] | None = None,
                               line: str = "1") -> dict:
     """Build the price band for a line from the records you judged comparable, and judge the quoted price.
@@ -316,7 +411,7 @@ def check_price_comparability(run_id: str, candidate_ids: list[int], rejected: d
     return result
 
 
-@mcp.tool()
+@tool
 def challenge_review(run_id: str, verdict: str, reason: str, objections: dict[str, str] | None = None,
                      line: str = "1") -> dict:
     """Record an independent second check of a line's price band: STANDS (a fair benchmark) or DISPUTED, why,
@@ -371,16 +466,17 @@ def review(run_id):
 
 
 def version(run_id):
-    """A draft is of a run at one moment: the id of its last recorded step."""
-    recorded = steps(run_id)
+    """A draft is of a run at one moment: the id of its last recorded step (progress notes are not changes)."""
+    recorded = [s for s in steps(run_id) if s.kind != "status"]
     return f"{run_id}@{recorded[-1].id if recorded else 0}"
 
 
 def discard_review(run_id):
     """A rejected or revised draft: delete its files and row, and cancel its pending request."""
     with engine().begin() as conn:
-        rows_ = conn.execute(select(REPORTS).where(REPORTS.c.run_id == run_id, REPORTS.c.status == "draft")).all()
-        conn.execute(REPORTS.delete().where(REPORTS.c.run_id == run_id, REPORTS.c.status == "draft"))
+        mine = (REPORTS.c.run_id == run_id, REPORTS.c.status == "draft", REPORTS.c.org == org())
+        rows_ = conn.execute(select(REPORTS).where(*mine)).all()
+        conn.execute(REPORTS.delete().where(*mine))
     store = storage()
     for row in rows_:
         for file in row.files or []:
@@ -388,15 +484,16 @@ def discard_review(run_id):
     supersede("write_price_review", f"{run_id}@")
 
 
-@mcp.tool()
-def write_price_review(run_id: str, approval: str = "") -> dict:
+@tool
+def write_price_review(run_id: str, approval: str = "", format: str = "") -> dict:
     """Write a review's report. A person must approve it before it becomes final.
 
     Without approval: builds the draft only from what this review recorded (its plan, searches, checks and
     second check), saves it, and replies with where it is and the command a person runs to approve it
-    (`fairprice --approve <request>`). With approval (a person's approval of this exact version of the review):
-    writes the final report under that person's name. If the review changed after the draft was made, the
-    approval is refused; write the draft again. Refused if the report cites no records or records that do not exist.
+    (on the approval page, or `fairprice --approve <request>`). With approval (a person's approval of this exact
+    version of the review): writes the final report under that person's name, in the draft's format. If the review
+    changed after the draft was made, the approval is refused; write the draft again. Refused if the report cites
+    no records or records that do not exist. format: xlsx, csv or json (default: the server's setting).
     """
     from fairprice import report as rep  # report imports this module
 
@@ -418,7 +515,9 @@ def write_price_review(run_id: str, approval: str = "") -> dict:
     costs = steps(run_id, kind="cost")
     if costs:
         data["report"]["cost"] = costs[-1].data
-    target, store, fmt = version(run_id), storage(), os.environ.get("FAIRPRICE_REPORT_FORMAT", "xlsx")
+    target, store, fmt = version(run_id), storage(), format or os.environ.get("FAIRPRICE_REPORT_FORMAT", "xlsx")
+    if fmt not in rep.FORMATS:
+        return {"error": f"format is one of {', '.join(rep.FORMATS)}"}
     if not approval:
         discard_review(run_id)  # one draft per review: the latest
         name = rep.draft_name(run.title, run_id)
@@ -428,17 +527,17 @@ def write_price_review(run_id: str, approval: str = "") -> dict:
         with engine().begin() as conn:
             conn.execute(REPORTS.insert().values(name=name, run_id=run_id, status="draft", format=fmt,
                                                  files=list(written), created_at=dt.datetime.now(dt.timezone.utc),
-                                                 data=data))
+                                                 data=data, org=org()))
         request = request_approval("write_price_review", target)
-        return {"status": "needs_approval", "request": request, "draft": name,
-                "files": [store.location(f) for f in written],
-                "message": f"A person must approve this report. In the terminal: uv run fairprice --approve {request}"}
+        return {"status": "needs_approval", "request": request, "draft": name, "files": [link(f) for f in written],
+                "message": f"A person must approve this report: {how_to_approve(request)}"}
     granted = use_approval(approval, "write_price_review", target)
     if granted is None:
         return {"error": "Refused: that is not an unused human approval for this version of the review. "
                          "If the review changed, call write_price_review without approval for a new draft."}
     with engine().connect() as conn:
-        draft = conn.execute(select(REPORTS).where(REPORTS.c.run_id == run_id, REPORTS.c.status == "draft")).first()
+        draft = conn.execute(select(REPORTS).where(REPORTS.c.run_id == run_id, REPORTS.c.status == "draft",
+                                                   REPORTS.c.org == org())).first()
     now = dt.datetime.now().astimezone()
     data["report"].update(status="approved", approved_by=granted.approved_by, approved_at=now.isoformat(timespec="seconds"))
     name = f"{now:%Y%m%d-%H%M%S}-{rep.draft_name(run.title, run_id).removeprefix('DRAFT-')}"
@@ -450,12 +549,12 @@ def write_price_review(run_id: str, approval: str = "") -> dict:
     with engine().begin() as conn:
         conn.execute(REPORTS.insert().values(name=name, run_id=run_id, status="approved", format=fmt,
                                              files=list(written), approved_by=granted.approved_by,
-                                             created_at=now, approved_at=now, data=data))
+                                             created_at=now, approved_at=now, data=data, org=org()))
     return {"saved": name, "run_id": run_id, "approved_by": granted.approved_by,
-            "files": [store.location(f) for f in written], "sources": len(cited)}
+            "files": [link(f) for f in written], "sources": len(cited)}
 
 
-@mcp.tool()
+@tool
 def get_price_review(run_id: str = "") -> dict:
     """An approved review's report as JSON. Without a run_id, list the approved reviews, newest first.
 
@@ -465,19 +564,37 @@ def get_price_review(run_id: str = "") -> dict:
     with engine().connect() as conn:
         if not run_id:
             found = conn.execute(select(REPORTS.c.run_id, REPORTS.c.name, REPORTS.c.approved_by, REPORTS.c.approved_at,
-                                        REPORTS.c.format).where(REPORTS.c.status == "approved")
+                                        REPORTS.c.format).where(REPORTS.c.status == "approved", REPORTS.c.org == org())
                                  .order_by(REPORTS.c.approved_at.desc()).limit(50)).all()
             return {"reports": [{"run_id": r.run_id, "name": r.name, "approved_by": r.approved_by, "format": r.format,
                                  "approved_at": r.approved_at.isoformat() if r.approved_at else None} for r in found]}
-        row = conn.execute(select(REPORTS).where(REPORTS.c.run_id == run_id, REPORTS.c.status == "approved")
-                           .order_by(REPORTS.c.id.desc())).first()
+        row = conn.execute(select(REPORTS).where(REPORTS.c.run_id == run_id, REPORTS.c.status == "approved",
+                                                 REPORTS.c.org == org()).order_by(REPORTS.c.id.desc())).first()
     if row is None:
         return {"error": f"No approved report for review {run_id!r}. Call get_price_review without a run_id to list them."}
-    store = storage()
-    return {**row.data, "files": [store.location(f) for f in row.files or []]}
+    return {**row.data, "files": [link(f) for f in row.files or []]}
 
 
-@mcp.tool()
+def how_to_approve(request):
+    if os.environ.get("FAIRPRICE_PUBLIC_URL"):
+        return f"an approving officer signs in at {PUBLIC_URL}/approve and decides request {request}."
+    return f"in the terminal: uv run fairprice --approve {request}"
+
+
+def sign(name, expires):
+    return hmac.new(SECRET.encode(), f"{name}|{expires}".encode(), hashlib.sha256).hexdigest()
+
+
+def link(name):
+    """Where a report file can be opened: a signed link for one hour when served over the web (or S3's own),
+    otherwise its path on this computer."""
+    if os.environ.get("FAIRPRICE_PUBLIC_URL") and os.environ.get("FAIRPRICE_STORAGE", "file") == "file":
+        expires = int(time.time()) + 3600
+        return f"{PUBLIC_URL}/reports/{name}?expires={expires}&sig={sign(name, expires)}"
+    return storage().location(name)
+
+
+@tool
 def list_countries() -> dict:
     """Countries with procurement data on the OCP Data Registry, which are loaded, and the progress of add_country."""
     from fairprice import ingest
@@ -489,7 +606,7 @@ def list_countries() -> dict:
     return {"countries": [{**c, "loaded": c["code"] in have} for c in found], "ingest": state}
 
 
-@mcp.tool()
+@tool
 def add_country(code: str, approval: str = "") -> dict:
     """Load a country's procurement data by ISO code (e.g. "RW"): every publication it has on the OCP Data Registry,
     plus World Bank inflation and exchange rates. A person must approve it first.
@@ -508,7 +625,7 @@ def add_country(code: str, approval: str = "") -> dict:
     if not approval:
         request = request_approval("add_country", code)
         return {"status": "needs_approval", "request": request,
-                "message": f"A person must approve adding {code}. In the terminal: uv run fairprice --approve {request}"}
+                "message": f"A person must approve adding {code}: {how_to_approve(request)}"}
     if use_approval(approval, "add_country", code) is None:
         return {"error": f"Refused: that is not an unused human approval to add {code}."}
     log = ROOT / "data" / "ingest.log"
@@ -544,7 +661,216 @@ def source_record(line_id: str) -> str:
     return json.dumps(r, default=str)
 
 
-def main():
+@tool
+def review_with_fairprice(run_id: str) -> dict:
+    """Have FairPrice's own agent review every line of a run in the background: its open model plans and runs the
+    searches and price checks, a second, independent agent tries to disprove each band, and the draft report is
+    written at the end with a request for a person to approve it. For apps that do not do the reasoning
+    themselves. A package takes minutes per distinct item; call review_status to follow it.
+    """
+    run = get_run(run_id)
+    if run is None:
+        return {"error": f"No review {run_id!r}."}
+    status = steps(run_id, "*", "status")
+    if status and status[-1].data.get("state") == "running" and running(status[-1].data.get("pid")):
+        return {"error": "This review is already running; call review_status."}
+    log = ROOT / "data" / "reviews" / f"{run_id}.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with log.open("a") as out:
+        proc = subprocess.Popen([sys.executable, "-m", "fairprice.agent", "--review", run_id], stdout=out,
+                                stderr=subprocess.STDOUT, start_new_session=True,
+                                env={**os.environ, "FAIRPRICE_ORG": org(),  # the agent works as this organisation
+                                     "FAIRPRICE_CALLER": f"FairPrice agent (for {(CALLER.get() or {}).get('name', 'this computer')})"})
+    add_step(run_id, "*", "status", {"state": "running", "pid": proc.pid})
+    return {"started": run_id, "lines": len(run.lines), "message": "Reviewing in the background; call review_status."}
+
+
+@tool
+def review_status(run_id: str) -> dict:
+    """How far FairPrice's own review of a run has got (review_with_fairprice): running, done or failed, how many
+    lines have a price check, and when done the summary, the draft report and the approval request."""
+    run = get_run(run_id)
+    if run is None:
+        return {"error": f"No review {run_id!r}."}
+    status = steps(run_id, "*", "status")
+    last = dict(status[-1].data) if status else {"state": "not started"}
+    if last["state"] == "running" and not running(last.get("pid")):
+        last = {"state": "failed", "error": "the review process ended without finishing"}
+    checked = {s.line for s in steps(run_id, kind="check")}
+    last.pop("pid", None)
+    return {"run_id": run_id, **last, "lines_checked": f"{len(checked)} of {len(run.lines)}"}
+
+
+def pending_request(request_id):
+    """A pending request of the caller's organisation, with what a person needs to decide it; or an error."""
+    row = {r.id: r for r in approvals("pending")}.get(request_id)
+    if row is None:
+        return None, {"error": f"No pending request {request_id}."}
+    target = row.target.split("@")[0]  # a review request is for one version of the review: <run id>@<step>
+    if row.action != "write_price_review":
+        return row, {"request": row.id, "action": row.action, "target": target,
+                     "summary": f"Add country {target}: download its procurement data and rebuild the database."}
+    with engine().connect() as conn:
+        draft = conn.execute(select(REPORTS).where(REPORTS.c.run_id == target, REPORTS.c.status == "draft",
+                                                   REPORTS.c.org == org())).first()
+    if draft is None:
+        return None, {"error": f"The draft for review {target} no longer exists."}
+    r = draft.data["report"]
+    return row, {"request": row.id, "action": row.action, "target": target, "title": r["title"],
+                 "summary": f"Approve the price review {target}: {r['title']}, {len(draft.data['prices'])} prices, "
+                            f"{len(draft.data['sources'])} sources.",
+                 "files": [link(f) for f in draft.files]}
+
+
+def decide_request(request_id, approve, name):
+    """A person's decision on an app's request, carried out at once: the approval is theirs, named by them."""
+    row, info = pending_request(request_id)
+    if row is None:
+        return info
+    decide(request_id, approve, name if approve else None)
+    audit(info["target"], event="human_decision", action="approve" if approve else "reject", name=name,
+          request=row.action, target=row.target)
+    if not approve:
+        if row.action == "write_price_review":
+            discard_review(info["target"])
+        return {"rejected": request_id, "message": "Rejected; nothing was changed."}
+    act = write_price_review if row.action == "write_price_review" else add_country
+    return act(info["target"], approval=request_id)
+
+
+@mcp.resource("fairprice://bid-package/schema", mime_type="application/schema+json")
+def package_schema() -> str:
+    """The bid package format (JSON Schema): BoQ, required documents and each bidder's price schedule."""
+    return Path(__file__).with_name("bid_package.schema.json").read_text()
+
+
+@mcp.resource("fairprice://bid-package/example", mime_type="application/json")
+def package_example() -> str:
+    """A complete example package (synthetic): three bidders, four required documents, seven planted problems."""
+    return (ROOT / "examples" / "bid-package.json").read_text()
+
+
+@mcp.resource("fairprice://bid-package/template.xlsx",
+              mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+def package_template() -> bytes:
+    """A blank tender workbook: BoQ, Documents, and one sheet per bidder."""
+    from fairprice import batch
+    return batch.template_bytes(".xlsx")
+
+
+# ---------------------------------------------------------------- the web: approvals, downloads (HTTP only)
+
+def page(title, body):
+    return HTMLResponse(f"<!doctype html><html lang=en><meta charset=utf-8><meta name=viewport "
+                        f"content='width=device-width,initial-scale=1'><title>{html.escape(title)}</title>"
+                        "<style>body{font:16px/1.5 system-ui,sans-serif;max-width:40rem;margin:2rem auto;padding:0 1rem}"
+                        "input,button{font:inherit;padding:.4rem;margin:.2rem 0}input{width:100%}</style>"
+                        f"<h1>{html.escape(title)}</h1>{body}</html>")
+
+
+def approver(key):
+    """The approving officer ({org, role, name, key}) for an approver's key, else None."""
+    return check_key(key or "", "approver")
+
+
+@mcp.custom_route("/approve", methods=["GET", "POST"])
+async def approve_page(request: Request):
+    """A person approves or rejects an app's request: their key names them, so the name is never the app's."""
+    if request.method == "GET":
+        return page("Approve a FairPrice request", "<form method=post><label>Your approver key "
+                    "<input name=key type=password required></label><label>Request "
+                    f"<input name=request required value='{html.escape(request.query_params.get('request', ''))}'>"
+                    "</label><button>Show the request</button></form>")
+    form = await request.form()
+    who = approver(form.get("key"))
+    if who is None:
+        return page("Not allowed", "<p>That is not a valid approver key.</p>")
+    token = CALLER.set(who)
+    try:
+        if form.get("decision") in ("approve", "reject"):
+            result = decide_request(form.get("request", ""), form["decision"] == "approve", who["name"])
+            return page("Done", f"<pre>{html.escape(json.dumps(result, indent=2, default=str))}</pre>")
+        row, info = pending_request(form.get("request", ""))
+        if row is None:
+            return page("Nothing to decide", f"<p>{html.escape(info['error'])}</p>")
+        files = "".join(f"<li><a href='{html.escape(f)}'>{html.escape(f.split('?')[0].rsplit('/', 1)[-1])}</a>"
+                        for f in info.get("files", []))
+        hidden = "".join(f"<input type=hidden name={k} value='{html.escape(form.get(k))}'>" for k in ("key", "request"))
+        return page("Decide", f"<p>{html.escape(info['summary'])}</p><ul>{files}</ul>"
+                    f"<p>You are signed in as <b>{html.escape(who['name'])}</b> ({html.escape(who['org'])}).</p>"
+                    f"<form method=post>{hidden}<button name=decision value=approve>Approve, under my name</button> "
+                    f"<button name=decision value=reject>Reject</button></form>")
+    finally:
+        CALLER.reset(token)
+
+
+@mcp.custom_route("/api/approvals", methods=["GET"])
+async def approvals_list_api(request: Request):
+    """Pending requests for software a person uses (FairPrice's CLI): Authorization: Bearer <approver key>."""
+    return await approvals_api(request)
+
+
+@mcp.custom_route("/api/approvals/{request_id}", methods=["POST"])
+async def approvals_api(request: Request):
+    """Decide a request: {"decision": "approve" | "reject"}, with Authorization: Bearer <approver key>."""
+    who = approver(request.headers.get("authorization", "").removeprefix("Bearer ").strip())
+    if who is None:
+        return JSONResponse({"error": "an approver's key is required"}, status_code=401)
+    token = CALLER.set(who)
+    try:
+        if request.method == "GET":
+            return JSONResponse({"requests": [pending_request(r.id)[1] for r in approvals("pending")]})
+        decision = (await request.json()).get("decision")
+        if decision not in ("approve", "reject"):
+            return JSONResponse({"error": "decision is approve or reject"}, status_code=400)
+        result = decide_request(request.path_params["request_id"], decision == "approve", who["name"])
+        return JSONResponse(json.loads(json.dumps(result, default=str)))
+    finally:
+        CALLER.reset(token)
+
+
+@mcp.custom_route("/reports/{name}", methods=["GET"])
+async def report_file(request: Request):
+    """A report file by the signed, one-hour link that write_price_review and get_price_review give out."""
+    name, q = request.path_params["name"], request.query_params
+    if not (q.get("expires", "").isdigit() and int(q["expires"]) > time.time()
+            and hmac.compare_digest(q.get("sig", ""), sign(name, int(q["expires"])))):
+        return Response("This link is not valid or has expired.", status_code=403)
+    try:
+        content = storage().load(name)
+    except (OSError, ValueError):
+        return Response("No such report file.", status_code=404)
+    return Response(content, headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+@mcp.custom_route("/template.xlsx", methods=["GET"])
+async def template_file(request: Request):
+    """A blank tender workbook, for people who fill tenders in by hand."""
+    return Response(package_template(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": 'attachment; filename="tender.xlsx"'})
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(description="FairPrice's MCP server.")
+    p.add_argument("--http", action="store_true", help="serve over HTTP (MCP at /mcp, approvals at /approve)")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=8000)
+    p.add_argument("--add-key", metavar="ORG", help="create an access key for an organisation, then exit")
+    p.add_argument("--role", choices=("app", "approver"), default="app",
+                   help="app: may call the tools; approver: a named officer who may approve")
+    p.add_argument("--name", help="the app's name, or the approving officer's full name")
+    p.add_argument("--revoke-key", metavar="ID", help="revoke an access key by its id (the part after fp_)")
+    args = p.parse_args(argv)
+    if args.add_key:
+        if not args.name:
+            p.error("--add-key needs --name")
+        key = add_key(args.add_key, args.role, args.name)
+        return print(f"Access key for {args.name} ({args.role}, {args.add_key}). Shown once; keep it like a password:\n{key}")
+    if args.revoke_key:
+        return print("Revoked." if revoke_key(args.revoke_key) else "No such active key.")
+    if args.http:
+        mcp.settings.host, mcp.settings.port = args.host, args.port
+        return mcp.run(transport="streamable-http")
     mcp.run()
 
 

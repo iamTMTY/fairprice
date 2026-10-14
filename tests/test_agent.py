@@ -184,7 +184,9 @@ def test_audit_log_and_its_viewer(capsys):
 
 
 def test_audit_interceptor_logs_and_reraises(capsys):
-    request = SimpleNamespace(server_name="fairprice", name="find_comparables", args={"keywords": ["x"]})
+    """The borrowed server's calls are logged by the client; our own server logs its calls itself."""
+    ours = SimpleNamespace(server_name="fairprice", name="find_comparables", args={"keywords": ["x"]})
+    request = SimpleNamespace(server_name="duckdb", name="execute_query", args={"sql": "SELECT 1"})
 
     async def ok(req):
         return SimpleNamespace(content=[{"text": "{}"}])
@@ -195,8 +197,10 @@ def test_audit_interceptor_logs_and_reraises(capsys):
     asyncio.run(agent.audit_interceptor(request, ok))
     with pytest.raises(RuntimeError):
         asyncio.run(agent.audit_interceptor(request, boom))
+    asyncio.run(agent.audit_interceptor(ours, ok))
     agent.show_audit("interceptor")
-    assert "tool failed" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "tool failed" in out and "2 entries" in out and "fairprice.find_comparables {" not in out
 
 
 def test_borrowed_server_offline_once_cached(monkeypatch):
@@ -261,7 +265,7 @@ def test_a_person_decides_requests_from_ai_apps(answers, capsys, monkeypatch):
     answers(["approve", "Ada Obi"])
     agent.approve_request(request)
     out = capsys.readouterr().out
-    assert f"asks to approve the price review {run}" in out and '"approved_by": "Ada Obi"' in out
+    assert f"An AI app asks: Approve the price review {run}" in out and '"approved_by": "Ada Obi"' in out
     assert server.get_price_review(json.loads(out[out.index("{"):])["run_id"])["report"]["approved_by"] == "Ada Obi"
     country = db.request_approval("add_country", "RW")
     answers(["reject"])
@@ -276,7 +280,7 @@ def test_a_person_decides_requests_from_ai_apps(answers, capsys, monkeypatch):
     answers(["approve", "Ada Obi"])
     with mock.patch.object(server, "add_country", return_value={"started": "RW"}) as add:
         agent.approve_request(country)
-    assert add.call_args.kwargs == {"approval": country} and "add country RW" in capsys.readouterr().out
+    assert add.call_args.kwargs == {"approval": country} and "Add country RW" in capsys.readouterr().out
     db.decide(gone, False)  # the last pending request, settled
     agent.approve_request("")
     assert "No requests waiting for approval." in capsys.readouterr().out

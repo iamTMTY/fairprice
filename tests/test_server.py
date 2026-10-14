@@ -118,7 +118,7 @@ def test_running_checks_a_process_exists():
 
 def test_main_starts_the_server():
     with mock.patch.object(server.mcp, "run") as run:
-        server.main()
+        server.main([])
     run.assert_called_once()
 
 

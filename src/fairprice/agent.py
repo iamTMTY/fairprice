@@ -15,6 +15,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import TypedDict
@@ -33,9 +34,9 @@ from langgraph.types import Command, interrupt
 from sqlalchemy import select
 
 from fairprice import ingest, report
-from fairprice.db import AUDIT_LOG, REPORTS, add_step, approvals, decide, engine
-from fairprice.storage import storage
+from fairprice.db import AUDIT_LOG, add_step, approvals, audit, decide, engine, get_run
 from fairprice.server import MIN_COMPARABLES, discard_review, record_id
+from fairprice.storage import storage
 
 ROOT = Path(__file__).resolve().parents[2]
 DB = str(ROOT / os.environ.get("FAIRPRICE_DB", "data/fairprice.duckdb"))  # relative paths are relative to ROOT
@@ -119,13 +120,6 @@ class State(TypedDict, total=False):
     saved: str
 
 
-def audit(run_id, **event):
-    """Append one row to the audit log. A row without an `event` name is a tool call."""
-    with engine().begin() as db:
-        db.execute(AUDIT_LOG.insert().values(ts=dt.datetime.now(dt.timezone.utc), run_id=run_id,
-                                             event=event.pop("event", "tool_call"), detail=event))
-
-
 def show_audit(run_id):
     """Print a run's audit log, oldest first. A batch id also shows every line's run."""
     with engine().connect() as db:
@@ -163,19 +157,20 @@ CURRENT_RUN = None  # one run per process
 
 
 async def audit_interceptor(request, handler):
-    """Every MCP tool call, on every server, is shown on screen and logged with inputs and outputs."""
+    """Every MCP tool call is shown on screen. FairPrice's own server audits its calls itself (whoever calls it);
+    calls to the borrowed DuckDB server are logged here."""
     print(f"  -> {request.server_name}.{request.name}({json.dumps(request.args, default=str)[:160]})", flush=True)
     start = time.perf_counter()
+    ours = request.server_name == "fairprice"
     try:
         result = await handler(request)
     except Exception as e:
-        audit(CURRENT_RUN, server=request.server_name, tool=request.name, args=request.args, error=repr(e))
+        if not ours:
+            audit(CURRENT_RUN, server=request.server_name, tool=request.name, args=request.args, error=repr(e))
         raise
-    run_id = CURRENT_RUN
-    if request.name in ("start_review", "start_package_review"):  # the call that creates the run is logged under it
-        run_id = as_json(tool_text(result)).get("run_id") or run_id
-    audit(run_id, server=request.server_name, tool=request.name, args=request.args,
-          output=tool_text(result), seconds=round(time.perf_counter() - start, 2))
+    if not ours:
+        audit(CURRENT_RUN, server=request.server_name, tool=request.name, args=request.args,
+              output=tool_text(result), seconds=round(time.perf_counter() - start, 2))
     return result
 
 
@@ -433,40 +428,46 @@ def choose(prompt, options):
 
 
 def approve_request(request_id):
-    """A person decides a request an AI app made through MCP (write_price_review or add_country without approval)."""
+    """A person decides a request an AI app made (write_price_review or add_country without approval). On this
+    computer it decides in the local database; with FAIRPRICE_SERVER_URL, on that server, as the approving officer
+    whose key is FAIRPRICE_APPROVER_KEY (the server takes their name from the key)."""
     from fairprice import server
-    pending = {r.id: r for r in approvals("pending")}
+    remote = os.environ.get("FAIRPRICE_SERVER_URL", "").rstrip("/")
+    if remote:
+        call = lambda method, path, body=None: api(method, f"{remote}{path}", body)
+        listed = call("GET", "/api/approvals")["requests"]
+        info = next((r for r in listed if r.get("request") == request_id), None)
+    else:
+        listed = [server.pending_request(r.id)[1] for r in approvals("pending")]
+        info = server.pending_request(request_id)[1] if request_id else None
     if not request_id:
-        print("\n".join(f"{r.id}  {r.action:<20} {r.target}  (asked {r.created_at:%d %b %H:%M})" for r in pending.values())
+        print("\n".join(f"{r.get('request', '?')}  {r.get('summary', r.get('error'))}" for r in listed)
               or "No requests waiting for approval.")
         return
-    if request_id not in pending:
-        raise SystemExit(f"No pending request {request_id}. Run `fairprice --approve` to list them.")
-    row = pending[request_id]
-    target = row.target.split("@")[0]  # a review request is for one version of the review: <run id>@<step>
-    if row.action == "write_price_review":
-        with engine().connect() as db:
-            draft = db.execute(select(REPORTS).where(REPORTS.c.run_id == target, REPORTS.c.status == "draft")).first()
-        if draft is None:
-            raise SystemExit(f"The draft for review {target} no longer exists.")
-        r = draft.data["report"]
-        print(f"An AI app asks to approve the price review {target}: {r['title']}, {len(draft.data['prices'])} "
-              f"prices, {len(draft.data['sources'])} sources. Files: " + ", ".join(storage().location(f) for f in draft.files))
-    else:
-        print(f"An AI app asks to add country {target}: download its procurement data and rebuild the database.")
+    if not info or "error" in info:
+        raise SystemExit((info or {}).get("error") or f"No pending request {request_id}. Run `fairprice --approve` to list them.")
+    print(f"An AI app asks: {info['summary']}" + (" Files: " + ", ".join(info["files"]) if info.get("files") else ""))
     action = choose("Decision", [("approve", "carry it out now, under your name"), ("reject", "refuse it")])
+    if remote:
+        print(json.dumps(call("POST", f"/api/approvals/{request_id}", {"decision": action}), indent=2))
+        return
     name = ""
     while action == "approve" and not name:
         name = input("Your full name: ").strip()
-    decide(request_id, action == "approve", name or None)
-    audit(target, event="human_decision", action=action, name=name or None, request=row.action, target=row.target)
-    if action == "approve":
-        tool = server.write_price_review if row.action == "write_price_review" else server.add_country
-        print(json.dumps(tool(target, approval=request_id), indent=2))
-    else:
-        if row.action == "write_price_review":
-            server.discard_review(target)
-        print("Rejected; nothing was changed.")
+    result = server.decide_request(request_id, action == "approve", name or None)
+    print(json.dumps(result, indent=2, default=str) if action == "approve" else "Rejected; nothing was changed.")
+
+
+def api(method, url, body=None):
+    """A call to a FairPrice server's approval API, as the approving officer whose key is FAIRPRICE_APPROVER_KEY."""
+    req = urllib.request.Request(url, method=method, data=json.dumps(body).encode() if body is not None else None,
+                                 headers={"Authorization": f"Bearer {os.environ.get('FAIRPRICE_APPROVER_KEY', '')}",
+                                          "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        raise SystemExit(f"The server refused: {e.read().decode(errors='replace')[:300]}")
 
 
 def ask_decision(can_approve=True):
@@ -707,6 +708,70 @@ async def run(args):
         audit(run_id, event="run_finished", saved=final.get("saved"), cost=usage.summary())
 
 
+async def review_unattended(run_id):
+    """`fairprice --review RUN_ID`, started by the server's review_with_fairprice: FairPrice's agent reviews every
+    line of an existing run, writes the draft and an approval request, and records the outcome for review_status."""
+    from fairprice import batch, server
+    run = get_run(run_id)
+    if run is None:
+        raise SystemExit(f"No review {run_id}.")
+    base = {k: run.request[k] for k in ("currency", "year", "country")}
+    try:
+        async with session() as (graph, tools):
+            usage = Usage()
+            await batch.analyse(graph, run.lines, base, run_id, usage=usage)
+            add_step(run_id, "*", "cost", usage.summary())
+            drafted = as_json(tool_text(await tools["write_price_review"].ainvoke({"run_id": run_id})))
+        _, lines, states = server.review(run_id)
+        summary = report.summary(lines, states, run.bidders, run.checks or [], run.request)
+        add_step(run_id, "*", "status", {"state": "done", **drafted, "summary": summary, "cost": usage.summary()})
+        print(summary)
+    except BaseException as e:
+        add_step(run_id, "*", "status", {"state": "failed", "error": repr(e)[:300]})
+        raise
+
+
+async def remote(args):
+    """FairPrice as a thin client of a FairPrice server (FAIRPRICE_SERVER_URL, with the app key FAIRPRICE_API_KEY):
+    it sends the tender or item, the server's agent reviews it, and a person approves on the server's page."""
+    import base64
+    url = os.environ["FAIRPRICE_SERVER_URL"].rstrip("/")
+    client = MultiServerMCPClient({"fairprice": {
+        "transport": "streamable_http", "url": f"{url}/mcp",
+        "headers": {"Authorization": f"Bearer {os.environ.get('FAIRPRICE_API_KEY', '')}"}}})
+    tools = {t.name: t for t in await client.get_tools()}
+
+    async def call(name, **arguments):
+        return as_json(tool_text(await tools[name].ainvoke(arguments)))
+    where = {"currency": args.currency or "", "year": args.year, "country": args.country}
+    if args.sheet:
+        started = await call("start_package_review", file=base64.b64encode(Path(args.sheet).read_bytes()).decode(),
+                             filename=Path(args.sheet).name, **where)
+    else:
+        started = await call("start_review", item=args.item, unit_price=args.unit_price, **where)
+    if "error" in started:
+        raise SystemExit("\n".join([started["error"], *(f"  - {p}" for p in started.get("problems", []))]))
+    run_id = started["run_id"]
+    print(f"Review {run_id} on {url}: {len(started['lines'])} line(s). Reviewing on the server…", flush=True)
+    await call("review_with_fairprice", run_id=run_id)
+    seen = None
+    while True:
+        status = await call("review_status", run_id=run_id)
+        if status.get("lines_checked") != seen:
+            seen = status.get("lines_checked")
+            print(f"  {seen} lines checked", flush=True)
+        if status.get("state") in ("done", "failed"):
+            break
+        await asyncio.sleep(POLL_SECONDS)
+    if status["state"] == "failed":
+        raise SystemExit(f"The review failed: {status.get('error')}")
+    print(f"\n{status.get('summary', '')}\n\nDraft report: " + ", ".join(status.get("files", [])))
+    print(status.get("message") or status.get("error", ""))
+
+
+POLL_SECONDS = 15
+
+
 def main():
     p = argparse.ArgumentParser(description="Prepare a sourced price-reasonableness file.")
     p.add_argument("item", nargs="?", help="what is being bought, e.g. 'Toyota Hilux double cabin'")
@@ -716,6 +781,7 @@ def main():
     p.add_argument("--country", default="NG", help="ISO code of a loaded country (see fairprice-ingest --list)")
     p.add_argument("--package", "--sheet", dest="sheet", metavar="FILE",
                    help="a bid package (.xlsx, .csv or .json) to review line by line; see README")
+    p.add_argument("--review", metavar="RUN_ID", help=argparse.SUPPRESS)  # the server's background review
     p.add_argument("--template", metavar="FILE", help="write a blank bid package (.xlsx, .csv or .json) to fill in")
     p.add_argument("--resume", help="resume a paused run by its id (with --package: reuse that batch's finished lines)")
     p.add_argument("--audit", metavar="RUN_ID", help="print the audit log of a run or batch, then exit")
@@ -735,6 +801,12 @@ def main():
     if args.template:
         from fairprice import batch
         return print(batch.template(args.template))
+    if args.review:
+        return asyncio.run(review_unattended(args.review))
+    if os.environ.get("FAIRPRICE_SERVER_URL") and (args.sheet or args.item):
+        if not (args.sheet or args.unit_price):
+            p.error("give an item and --unit-price, or a --package")
+        return asyncio.run(remote(args))
     if args.sheet:
         from fairprice import batch
         return asyncio.run(batch.run(args))

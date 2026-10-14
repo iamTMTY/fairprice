@@ -18,13 +18,13 @@
   </defs>
   <rect width="1400" height="960" fill="#fff"/>
   <text x="40" y="44" font-size="26" font-weight="700" fill="#111">FairPrice: architecture and data flow</text>
-  <text x="40" y="70" class="s">Prepares a sourced price-reasonableness file for a tender evaluation committee. It never awards a tender.</text>
+  <text x="40" y="66" class="s">Prepares a sourced price-reasonableness file for a tender evaluation committee. It never awards a tender.</text>
 
   <!-- Human: analyst -->
   <rect x="40" y="110" width="260" height="90" rx="10" fill="#fdf2e9" stroke="#d46222" stroke-width="1.6"/>
-  <text x="60" y="140" class="h">Procurement analyst</text>
-  <text x="60" y="162" class="s">Enters an item and its quoted price,</text>
-  <text x="60" y="180" class="s">or a whole bid package (CLI)</text>
+  <text x="60" y="140" class="h">Procurement systems, AI apps</text>
+  <text x="60" y="162" class="s">over HTTP with an access key,</text>
+  <text x="60" y="180" class="s">or the FairPrice CLI: a tender or a price</text>
 
   <!-- LLM -->
   <rect x="40" y="290" width="260" height="130" rx="10" fill="#eef3fb" stroke="#3b6fb6" stroke-width="1.6"/>
@@ -37,14 +37,14 @@
   <!-- Human: officer -->
   <rect x="40" y="520" width="260" height="100" rx="10" fill="#fdecea" stroke="#c0392b" stroke-width="1.6"/>
   <text x="60" y="550" class="h">Approving officer (named)</text>
-  <text x="60" y="572" class="s">Approves, revises or rejects the draft;</text>
-  <text x="60" y="590" class="s">revise sends questions to the Analyst</text>
+  <text x="60" y="572" class="s">Approves or rejects on /approve with</text>
+  <text x="60" y="590" class="s">their own key (or in the terminal)</text>
   <text x="60" y="608" class="s">Committee decides the award</text>
 
   <!-- Orchestrator -->
   <rect x="360" y="100" width="540" height="560" rx="12" fill="#f7f7f7" stroke="#333" stroke-width="1.8"/>
-  <text x="380" y="130" class="h">LangGraph orchestrator  (MCP client)</text>
-  <text x="380" y="150" class="s">State graph · SQLite checkpointer holds run state across the approval pause</text>
+  <text x="380" y="130" class="h">FairPrice's own agent  (an MCP client)</text>
+  <text x="380" y="150" class="s">LangGraph · runs in the CLI, or in the background for review_with_fairprice</text>
 
   <g>
     <rect x="390" y="170" width="480" height="50" rx="8" fill="#fff" stroke="#555"/>
@@ -87,8 +87,10 @@
   <text x="380" y="646" class="s">Every step is recorded under the run; every tool call is audit-logged</text>
 
   <!-- Human / LLM links -->
-  <path class="ln" d="M300,155 H360" marker-end="url(#a)"/>
-  <text x="306" y="146" class="lbl">request</text>
+  <path class="ln" d="M300,170 H360" marker-end="url(#a)"/>
+  <text x="306" y="186" class="lbl">CLI</text>
+  <path class="ln" d="M240,110 V88 H1160 V100" marker-end="url(#a)"/>
+  <text x="560" y="83" class="lbl">apps call the tools directly: MCP over HTTP, an access key per organisation</text>
   <path class="ln" d="M300,355 H360" marker-start="url(#a)" marker-end="url(#a)"/>
   <text x="306" y="346" class="lbl">prompts</text>
   <text x="306" y="374" class="lbl">tool calls</text>
@@ -97,8 +99,8 @@
 
   <!-- MCP servers -->
   <rect x="960" y="100" width="400" height="290" rx="12" fill="#eef8f0" stroke="#2e8b57" stroke-width="1.8"/>
-  <text x="980" y="130" class="h">fairprice-mcp  (built by us)</text>
-  <text x="980" y="150" class="s">Python MCP SDK · stdio transport</text>
+  <text x="980" y="130" class="h">fairprice-mcp: the product</text>
+  <text x="980" y="150" class="s">stdio, or HTTP with keys per organisation · audits every call</text>
   <text x="980" y="180" class="t" font-weight="700">Tools</text>
   <text x="1030" y="180" class="s">(every step recorded under the run)</text>
   <text x="990" y="200" class="m">start_review · start_package_review</text>
@@ -111,8 +113,7 @@
   <text x="990" y="324" class="s">draft; final only with a person's approval (gated)</text>
   <text x="990" y="344" class="m">list_countries · add_country</text>
   <text x="990" y="360" class="s">load a country's data (gated)</text>
-  <text x="990" y="380" class="m">ocds://line/{id}</text>
-  <text x="1130" y="380" class="s">record behind each citation</text>
+  <text x="990" y="380" class="m">review_with_fairprice · review_status</text>
 
   <rect x="960" y="420" width="400" height="110" rx="12" fill="#f3eefb" stroke="#6b4bb6" stroke-width="1.8"/>
   <text x="980" y="450" class="h">DuckDB MCP server  (borrowed)</text>

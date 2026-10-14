@@ -36,10 +36,22 @@ There is one approval gate for the whole package, and `revise` can redo chosen l
 
 | Server | Built or borrowed | Tools and resources | Used by |
 |---|---|---|---|
-| `fairprice-mcp` (`src/fairprice/server.py`) | Built, with the official MCP Python SDK | Runs: `start_review`, `start_package_review`. Steps: `plan_searches`, `find_comparables`, `check_price_comparability`, `challenge_review`. Reports: `write_price_review` (the action tool), `get_price_review`. Data: `list_countries`, `add_country`. Resource `ocds://line/{id}` | Analyst, Challenger (to record its verdict), Recheck, Save, other MCP clients |
+| `fairprice-mcp` (`src/fairprice/server.py`), **the product** | Built, with the official MCP Python SDK; stdio or streamable HTTP | Runs: `start_review`, `start_package_review` (JSON or an uploaded workbook). Steps: `plan_searches`, `find_comparables`, `check_price_comparability`, `challenge_review`. FairPrice's own agent as a service: `review_with_fairprice`, `review_status`. Reports: `write_price_review` (the action tool), `get_price_review`. Data: `list_countries`, `add_country`. Resources: the tender format, an example, a blank workbook, and `ocds://line/{id}` | Other MCP clients (procurement systems, AI apps); FairPrice's CLI; FairPrice's own agent (Analyst, Challenger, Recheck, Save) |
 | `mcp-server-motherduck==1.1.0` | Borrowed (MotherDuck, open source) | `execute_query`, `list_tables`, `list_columns`, `list_databases`; read-only by default for local files | Challenger |
 
 **Why borrow the DuckDB server:** it is a maintained SQL server with a read-only mode, row limits and query timeouts already built in. Writing our own would add risk and no value. Keeping it separate also means the Challenger cannot simply rerun the Analyst's tools to confirm the Analyst's conclusion. It needs MCP SDK 2.x while our LangChain adapter needs 1.x, so it runs in its own environment through `uvx`. Once it is cached it starts with `--offline`, because a network blip during one eval run once failed the run when `uvx` checked PyPI.
+
+### The server is the product; the CLI is one client
+
+Everything a review needs is behind the server, so it can be deployed as a web service that other systems build on:
+
+- **Audit where the work happens.** Every tool goes through one wrapper (`server.tool`) that writes the audit row (inputs, output, time, organisation, caller) in the server, whoever called. The CLI only logs calls to the borrowed DuckDB server, which is not ours.
+- **Access keys and organisations** (`--http`). Each key belongs to one organisation and has one role: *app* (calls tools) or *approver* (a named officer). Runs, reports, approval requests and audit rows carry their organisation, and every query is scoped to the caller's (`db.org()`), so one ministry never sees another's bid prices. On one computer (stdio) everything belongs to "local".
+- **People approve outside the tools.** Over HTTP, an officer approves on `/approve` (or `/api/approvals`) with their own key; the server takes their name from the key. An app's key is refused there, and an approver's key is refused by the tools, so an AI cannot approve its own work.
+- **Workbooks travel through MCP.** `start_package_review` takes the file itself (base64) and reads it exactly as the CLI does, so problems are reported with their sheet and row.
+- **FairPrice's own agent is a background service.** `review_with_fairprice` starts `fairprice --review <run>` as a separate process, working as the caller's organisation, and records its progress in the run (`status` steps, which do not count as changes to the review); `review_status` reports it. Apps that cannot reason themselves get the full Analyst–Challenger review this way.
+- **Files by link.** Report files come back as signed links valid for one hour (`/reports/...`), or S3's own.
+- **The CLI uses the same doors.** With `FAIRPRICE_SERVER_URL`, `fairprice` uploads the tender, starts the server's review, follows its status, and approves through the approval API: nothing private.
 
 ### Runs: one review across many tool calls
 
