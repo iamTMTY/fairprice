@@ -13,7 +13,7 @@ from openpyxl import load_workbook
 from conftest import ScriptedModel, fake_session
 from fairprice import batch, db, server
 
-EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
+EXAMPLES = Path(__file__).resolve().parents[1] / "evals" / "packages"  # the eval's 3-line package, in each form
 
 
 @pytest.mark.parametrize("ext", ["xlsx", "csv", "json"])
@@ -174,3 +174,12 @@ def test_template_in_each_format(tmp_path, monkeypatch):
     monkeypatch.setattr("sys.argv", ["fairprice", "--template", str(tmp_path / "u.json")])
     agent.main()
     assert (tmp_path / "u.json").exists()
+
+
+def test_the_example_package_is_one_line_with_two_planted_problems():
+    """examples/: small enough to run in a few minutes, and still showing the bid file checks."""
+    examples = Path(__file__).resolve().parents[1] / "examples"
+    packages = [batch.load(examples / f"bid-package.{ext}")[0] for ext in ("xlsx", "csv", "json")]
+    assert packages[0] == packages[1] == packages[2] and len(packages[0]["boq"]) == 1
+    found = {(c["check"], c["bidder"]) for c in batch.file_checks(*batch.unpack(packages[0]))}
+    assert found == {("arithmetic_error", "Bidder B"), ("quantity_changed", "Bidder C")}

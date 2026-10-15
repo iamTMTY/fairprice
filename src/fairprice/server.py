@@ -666,7 +666,7 @@ def package_schema() -> str:
 
 @mcp.resource("fairprice://bid-package/example", mime_type="application/json")
 def package_example() -> str:
-    """A complete example package (synthetic): three bidders and four planted problems."""
+    """A complete example package (synthetic): one line, three bidders and two planted problems."""
     return (ROOT / "examples" / "bid-package.json").read_text()
 
 

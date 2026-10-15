@@ -173,7 +173,7 @@ A bid package is the bill of quantities and each bidder's price schedule:
 | **BoQ** | Item No, Description, Unit, Quantity, and optionally Budget per unit |
 | **One sheet per bidder**, named after the bidder | That bidder's price schedule: Item No, Unit Price, and optionally Description, Unit, Quantity, Total Price |
 
-**Bids are not published anywhere, so the package is invented.** `examples/bid-package.xlsx`, `.csv` and `.json` are the same **synthetic** package in three forms: three invented bidders, invented prices and four planted problems. FairPrice is built on the other half of the brief, the real published award data; the package is only the way to hand it prices to check. All three forms must match one schema, [`src/fairprice/bid_package.schema.json`](src/fairprice/bid_package.schema.json), which another system can use to check a file before sending it.
+**Bids are not published anywhere, so the package is invented.** `examples/bid-package.xlsx`, `.csv` and `.json` are the same **synthetic** package in three forms: one line (a Toyota Hilux), three invented bidders, invented prices and two planted problems, small enough to run in a few minutes. The eval suite uses a 3-line version in `evals/packages/`. FairPrice is built on the other half of the brief, the real published award data; the package is only the way to hand it prices to check. All three forms must match one schema, [`src/fairprice/bid_package.schema.json`](src/fairprice/bid_package.schema.json), which another system can use to check a file before sending it.
 
 The price columns are those of a standard price schedule (Item No, Description, Unit, Quantity, Unit Price, Total Price), so a bidder's schedule can usually be pasted in as it is. The headings procuring entities commonly use for the same columns are accepted too:
 
@@ -204,7 +204,7 @@ Problems are reported in two passes: cells that cannot be read first, then rules
 Before the agent starts, FairPrice prints what it read, so a wrong file is caught in seconds:
 
 ```
-Read bid-package.xlsx: BoQ with 3 lines, 3 bidders
+Read package.xlsx: BoQ with 3 lines, 3 bidders
   Bidder A: 3 of 3 lines priced
   Bidder C: 2 of 3 lines priced (not priced: 3)
 ```
@@ -348,7 +348,8 @@ uv run fairprice --package package.xlsx --year 2025    # uploads it; the server'
 | `src/fairprice/evals.py`, `evals/cases.json` | The eval suite |
 | `tests/` | Unit and integration tests (99% line and branch coverage); see below |
 | `evals/classifier_experiment.py` | A model we tested and rejected (see EVALS.md) |
-| `examples/bid-package.xlsx`, `.csv`, `.json` | The same synthetic bid package in each form; templates |
+| `examples/bid-package.xlsx`, `.csv`, `.json` | The same synthetic bid package (one line) in each form |
+| `evals/packages/` | The 3-line synthetic bid package the eval suite uses |
 | `ARCHITECTURE.md` | Agent shape, MCP servers built and borrowed, and why |
 | `EVALS.md` | Test tasks, pass and fail results, run-to-run variation, an unfixed failure |
 

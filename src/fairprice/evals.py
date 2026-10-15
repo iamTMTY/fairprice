@@ -209,7 +209,7 @@ def deterministic_checks():
             refused = e.problems
         results.append({"case": f"a bid package with {name} is refused, with its location", "passed": bool(refused),
                         "detail": refused})
-    package, where = batch.load(ROOT / "examples" / "bid-package.xlsx")
+    package, where = batch.load(ROOT / "evals" / "packages" / "bid-package.xlsx")  # the eval's 3-line package
     found = {(c["check"], c["bidder"], c["line"]) for c in batch.file_checks(*batch.unpack(package, where))}
     planted = {("arithmetic_error", "Bidder B", "2"), ("quantity_changed", "Bidder C", "1"),
                ("missing_line", "Bidder C", "3"), ("identical_prices", "Bidder A, Bidder C", "1, 2")}

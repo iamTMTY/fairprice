@@ -16,7 +16,7 @@ from starlette.testclient import TestClient
 from conftest import ScriptedModel, fake_session, ids
 from fairprice import agent, db, server
 
-EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
+EXAMPLES = Path(__file__).resolve().parents[1] / "evals" / "packages"  # the eval's 3-line package
 HILUX = "SELECT id FROM lines WHERE description LIKE 'Supply of Toyota Hilux double cabin pickup unit%' ORDER BY id"
 APP = None
 

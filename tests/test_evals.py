@@ -30,7 +30,7 @@ def test_model_free_checks_pass(monkeypatch):
 def test_run_cases_and_write_results(tmp_path, monkeypatch, capsys):
     cases = [{"id": "hilux", "item": "Toyota Hilux double cabin pickup", "unit_price": 95e6, "year": 2025,
               "expect": ["within_band"], "traps": []},
-             {"id": "pkg", "package": "examples/bid-package.json", "year": 2025,
+             {"id": "pkg", "package": "evals/packages/bid-package.json", "year": 2025,
               "expect_cells": {"1/Bidder B": ["above_band"], "3/Bidder C": ["not_priced"]}},
              {"id": "broken", "package": "examples/missing.json", "year": 2025, "expect_cells": {}}]
     (tmp_path / "cases.json").write_text(json.dumps(cases))
