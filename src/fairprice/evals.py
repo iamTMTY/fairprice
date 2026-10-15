@@ -48,7 +48,7 @@ def judge(case, state):
 
 def cost(usage):
     c = usage.summary()
-    return {k: c[k] for k in ("model_calls", "input_tokens", "output_tokens", "model_seconds")}
+    return {k: c[k] for k in ("model_calls", "input_tokens", "output_tokens", "model_seconds", "api_fees", "hosted_cost")}
 
 
 async def run_package(graph, case, model):

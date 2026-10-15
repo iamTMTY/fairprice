@@ -30,7 +30,13 @@ from langchain_core.language_models import BaseChatModel  # noqa: E402
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage  # noqa: E402
 from langchain_core.outputs import ChatGeneration, ChatResult  # noqa: E402
 
-from fairprice import ingest  # noqa: E402
+from fairprice import ingest, prices  # noqa: E402
+
+prices.CACHE = TMP / "model-prices.json"  # tests never fetch prices: a fixed list, dated today
+prices.CACHE.write_text(json.dumps({"fetched": __import__("datetime").date.today().isoformat(),
+                                    "models": {"google/gemma-4-26b-a4b-it": [9e-8, 3e-7],
+                                               "google/gemma-4-31b-it": [2e-7, 4e-7],
+                                               "openai/gpt-4o-mini": [1.5e-7, 6e-7]}}))
 
 ingest.RAW, ingest.MANIFEST, ingest.STATUS = TMP / "raw", TMP / "raw" / "manifest.json", TMP / "ingest-status.json"
 SOURCE = TMP / "registry"  # the "downloads" the mocked registry serves

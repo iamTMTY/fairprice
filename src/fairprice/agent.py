@@ -32,7 +32,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 from sqlalchemy import select
 
-from fairprice import ingest, report
+from fairprice import ingest, prices, report
 from fairprice.db import AUDIT_LOG, add_step, audit, engine, get_run
 from fairprice.server import MIN_COMPARABLES, record_id
 from fairprice.storage import storage
@@ -582,18 +582,23 @@ class Usage(BaseCallbackHandler):
                 self.output_tokens += usage.get("output_tokens", 0)
 
     def summary(self):
-        price_in = float(os.environ.get("FAIRPRICE_PRICE_PER_MILLION_INPUT_TOKENS", 0))
-        price_out = float(os.environ.get("FAIRPRICE_PRICE_PER_MILLION_OUTPUT_TOKENS", 0))
+        """The run's cost. hosted_cost is what its tokens cost on a hosted API: the fee for an API model, and the
+        saving for a local one."""
+        price, local = prices.price(MODEL), prices.is_local(MODEL)
+        hosted = round(self.input_tokens * price[0] + self.output_tokens * price[1], 6) if price else None
         return {"model": MODEL, "model_calls": self.calls, "input_tokens": self.input_tokens,
-                "output_tokens": self.output_tokens, "model_seconds": round(self.seconds, 1),
-                "api_fees": round((self.input_tokens * price_in + self.output_tokens * price_out) / 1e6, 4),
-                "api_fees_currency": os.environ.get("FAIRPRICE_PRICE_CURRENCY", "USD")}
+                "output_tokens": self.output_tokens, "model_seconds": round(self.seconds, 1), "local_model": local,
+                "api_fees": 0.0 if local else hosted, "hosted_cost": hosted, "priced_as": price[2] if price else None,
+                "currency": "USD"}
 
     def line(self):
         c = self.summary()
-        fees = f"{c['api_fees_currency']} {c['api_fees']:.2f}" + (" (local model)" if c["api_fees"] == 0 else "")
+        if c["local_model"]:
+            fees = "$0.00 (local model)" + (f"({prices.money(c['hosted_cost'])} saved)" if c["hosted_cost"] is not None else "")
+        else:
+            fees = prices.money(c["api_fees"]) if c["api_fees"] is not None else "not calculated (no price found for this model)"
         return (f"Cost of this run: {c['model_calls']} model call{'s' if c['model_calls'] != 1 else ''}, {c['input_tokens']:,} input and "
-                f"{c['output_tokens']:,} output tokens, {c['model_seconds']:.0f} s of model time, API fees {fees}.")
+                f"{c['output_tokens']:,} output tokens, {c['model_seconds']:.0f} s of model time, API fees {fees}")
 
 
 @contextlib.asynccontextmanager

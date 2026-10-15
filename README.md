@@ -133,10 +133,10 @@ After that, everything runs offline. Each item takes about 2 minutes on the lapt
 **Cost of a run.** Every run ends with what it cost, for example:
 
 ```
-Cost of this run: 9 model calls, 41,203 input and 1,876 output tokens, 98 s of model time, API fees USD 0.00 (local model).
+Cost of this run: 34 model calls, 131,498 input and 7,356 output tokens, 457 s of model time, API fees $0.00 (local model)($0.01 saved)
 ```
 
-The same figures are stored with the report (in its JSON, under `report.cost`) and in the audit log (`uv run fairprice --audit <run id>`). With a local model there are no API fees. If you point FairPrice at a paid provider, set its prices (`FAIRPRICE_PRICE_PER_MILLION_INPUT_TOKENS`, `FAIRPRICE_PRICE_PER_MILLION_OUTPUT_TOKENS`, `FAIRPRICE_PRICE_CURRENCY`) and the fee is worked out per run. EVALS.md gives measured tokens per run for each eval task.
+With a local model there are no API fees; the amount saved is what the same tokens would cost on the closest hosted model (for Ollama's `gemma4`, the smallest Gemma 4 on OpenRouter). With an API model the line shows the fee instead: `API fees $0.01`. Prices come from OpenRouter's public price list (no key needed), cached in `data/model-prices.json` and refreshed weekly. To use your own price instead (a negotiated rate), set `FAIRPRICE_PRICE_PER_MILLION_INPUT_TOKENS` and `…_OUTPUT_TOKENS` in US dollars. The same figures, and which model they were priced as, are stored with the report (in its JSON, under `report.cost`) and in the audit log (`uv run fairprice --audit <run id>`). EVALS.md gives measured tokens per run for each eval task.
 
 At the end, a short summary is printed. You pick a decision with the arrow keys and Enter, or by pressing 1, 2 or 3:
 
@@ -258,7 +258,7 @@ Put settings in a `.env` file next to `pyproject.toml` (copy `.env.example`, whi
 | `OLLAMA_HOST` | `http://localhost:11434` | Where Ollama runs, if not on this computer. |
 | `FAIRPRICE_MODEL` | `ollama:gemma4` | The model, as `provider:model`. |
 | `FAIRPRICE_MODEL_URL`, `FAIRPRICE_MODEL_API_KEY` | none | Your OpenAI-compatible server, for `FAIRPRICE_MODEL=openai:<name>` (see step 2). |
-| `FAIRPRICE_PRICE_PER_MILLION_INPUT_TOKENS`, `…_OUTPUT_TOKENS`, `FAIRPRICE_PRICE_CURRENCY` | `0`, `0`, `USD` | Prices for working out API fees per run, if you use a paid provider. |
+| `FAIRPRICE_PRICE_PER_MILLION_INPUT_TOKENS`, `…_OUTPUT_TOKENS` | OpenRouter's price | Your own price in US dollars per million tokens, instead of OpenRouter's list. |
 
 With S3 storage, reports are shown as download links that work for one hour.
 
@@ -360,7 +360,7 @@ Created when you run it (not in the repo): `data/` (downloads, database, run sta
 uv run pytest --cov
 ```
 
-97 tests, 99% line and branch coverage, about 30 seconds, and no model or network needed. They run against a small synthetic dataset built through the real ingest (registry, downloads and World Bank mocked): a Nigeria-style publication with item quantities and the traps the agent must handle (a bundle, a placeholder date, a test record, a duplicate, a multi-item contract), a Kenya-style one with award totals only, and a Rwanda-style one with prices per item. A scripted model stands in for Gemma, so the agent graph, the approval gate, the CLI, the bid packages and the eval runner all run for real; one integration test starts both MCP servers as subprocesses over stdio, and the web tests call the server over HTTP with access keys from two organisations. The tests never touch `data/`, `reports/` or your database.
+102 tests, 99% line and branch coverage, about 30 seconds, and no model or network needed. They run against a small synthetic dataset built through the real ingest (registry, downloads and World Bank mocked): a Nigeria-style publication with item quantities and the traps the agent must handle (a bundle, a placeholder date, a test record, a duplicate, a multi-item contract), a Kenya-style one with award totals only, and a Rwanda-style one with prices per item. A scripted model stands in for Gemma, so the agent graph, the approval gate, the CLI, the bid packages and the eval runner all run for real; one integration test starts both MCP servers as subprocesses over stdio, and the web tests call the server over HTTP with access keys from two organisations. The tests never touch `data/`, `reports/` or your database.
 
 The tests prove the code does what it should. They do not measure how good the model's judgement is; that is what the evals are for (EVALS.md).
 

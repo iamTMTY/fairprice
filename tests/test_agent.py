@@ -239,7 +239,7 @@ def test_session_starts_both_mcp_servers_and_builds_the_database_when_missing(mo
     asyncio.run(agent.run(argparse.Namespace(resume=None, **REQ)))
     out = capsys.readouterr().out
     assert "-> fairprice.find_comparables" in out and "-> duckdb.execute_query" in out and '"saved"' in out
-    assert "Cost of this run: " in out and "API fees USD 0.00 (local model)" in out
+    assert "Cost of this run: " in out and "API fees $0.00 (local model)($" in out
     built = []
     monkeypatch.setattr(agent, "DB", str(tmp_path / "missing.duckdb"))
     monkeypatch.setattr(agent.ingest, "main", lambda argv: built.append(argv))
@@ -318,10 +318,18 @@ def test_usage_counts_calls_tokens_time_and_fees(monkeypatch):
     usage.on_llm_end(SimpleNamespace(generations=[[SimpleNamespace(message=None)]]), run_id="never-started")
     c = usage.summary()
     assert (c["model_calls"], c["input_tokens"], c["output_tokens"]) == (3, 3000, 400)
-    monkeypatch.setenv("FAIRPRICE_PRICE_PER_MILLION_INPUT_TOKENS", "2")
+    # a local model: no fees, and what the same tokens cost on the closest hosted model (the smallest Gemma 4)
+    assert (c["local_model"], c["api_fees"], c["priced_as"].split(" ")[0]) == (True, 0.0, "google/gemma-4-26b-a4b-it")
+    assert usage.line().endswith("API fees $0.00 (local model)($0.00039 saved)")
+    monkeypatch.setenv("FAIRPRICE_PRICE_PER_MILLION_INPUT_TOKENS", "2")  # a negotiated price wins
     monkeypatch.setenv("FAIRPRICE_PRICE_PER_MILLION_OUTPUT_TOKENS", "10")
-    assert usage.summary()["api_fees"] == 0.01
-    assert "3 model calls, 3,000 input and 400 output tokens" in usage.line() and "USD 0.01." in usage.line()
+    assert usage.line().endswith("($0.01 saved)") and usage.summary()["priced_as"] == "your price"
+    monkeypatch.delenv("FAIRPRICE_PRICE_PER_MILLION_INPUT_TOKENS")
+    monkeypatch.delenv("FAIRPRICE_PRICE_PER_MILLION_OUTPUT_TOKENS")
+    monkeypatch.setattr(agent, "MODEL", "openai:gpt-4o-mini")  # an API model: the fee itself
+    assert usage.line().endswith("API fees $0.00069") and usage.summary()["api_fees"] == 0.00069
+    monkeypatch.setattr(agent, "MODEL", "anthropic:unknown")
+    assert usage.line().endswith("API fees not calculated (no price found for this model)")
 
 
 class Reply:
