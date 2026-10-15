@@ -13,3 +13,4 @@ data/ingest*
 .coverage
 .pytest_cache/
 data/reviews/
+data/duckdb-server.log

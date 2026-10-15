@@ -208,7 +208,9 @@ def test_borrowed_server_offline_once_cached(monkeypatch):
     assert agent.borrowed_args()[0] == "--offline"
     monkeypatch.setattr(agent.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=1))
     assert agent.borrowed_args()[0] == agent.BORROWED
-    assert set(agent.servers()) == {"fairprice", "duckdb"}
+    found = agent.servers()
+    assert set(found) == {"fairprice", "duckdb"}
+    assert found["duckdb"]["args"][2:4] == [str(agent.BORROWED_LOG), "uvx"]  # its log lines go to a file
 
 
 def test_main_parses_the_command_line(monkeypatch, capsys):

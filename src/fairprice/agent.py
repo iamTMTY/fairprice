@@ -52,12 +52,20 @@ def borrowed_args():
     return (["--offline"] if cached else []) + [BORROWED, "--db-path", DB, "--max-rows", "100", "--ephemeral-connections"]
 
 
+# The borrowed server logs every start-up step at INFO with no way to turn it off; this runs it with its log
+# lines going to a file instead of the screen (its MCP messages still go through stdin and stdout).
+QUIET = "import subprocess, sys; sys.exit(subprocess.call(sys.argv[2:], stderr=open(sys.argv[1], 'a')))"
+BORROWED_LOG = ROOT / "data" / "duckdb-server.log"
+
+
 def servers():
+    BORROWED_LOG.parent.mkdir(parents=True, exist_ok=True)
     return {
         "fairprice": {"command": sys.executable, "args": ["-m", "fairprice.server"], "transport": "stdio",
                       "env": {**os.environ, "FAIRPRICE_DB": DB}},
         # Borrowed: MotherDuck's DuckDB MCP server, read-only by default for local files.
-        "duckdb": {"command": "uvx", "args": borrowed_args(), "transport": "stdio",
+        "duckdb": {"command": sys.executable, "args": ["-c", QUIET, str(BORROWED_LOG), "uvx", *borrowed_args()],
+                   "transport": "stdio",
                    "env": {**os.environ, "FASTMCP_SHOW_SERVER_BANNER": "false", "FASTMCP_LOG_LEVEL": "WARNING"}},
     }
 

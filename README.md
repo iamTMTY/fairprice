@@ -330,6 +330,7 @@ uv run fairprice --package package.xlsx --year 2025    # uploads it; the server'
 | `model "gemma4" not found` | Run `ollama pull gemma4`. |
 | The first run stops while downloading or building | Run the same command again. Finished downloads are kept; an unfinished build starts over. |
 | `… was not read: it does not match the bid package format` | Fix each listed problem; the templates in `examples/` show the exact layout. |
+| `Connection closed` when a run starts | One of the two MCP servers did not start. The borrowed DuckDB server writes its messages to `data/duckdb-server.log` instead of the screen; the reason is usually there. |
 | A run is very slow | About 2 minutes per item is normal on a laptop. Keep the computer awake and plugged in. |
 
 ## What is in the repo
