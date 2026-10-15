@@ -102,7 +102,7 @@ async def run_case(graph, tools, case, model):
         result = judge(case, state)
         final = state.get("final") or {}
         replayed = (server.review(run_id)[2].get("1") or {}).get("final")
-        if "accepted" in final and replayed != final:  # a band the tools built (not an unresolved run)
+        if "price_under_review" in final and replayed != final:  # a check the tools made (not an unresolved run)
             result["failures"].append("the run's recorded steps do not replay to the same result")
             result["passed"] = False
     except Exception as e:

@@ -71,7 +71,7 @@ def test_too_few_comparables_gives_no_band():
     laptops = ids("SELECT id FROM lines WHERE description LIKE 'Laptop computer%'")
     out = server.price_band(2e6, "NGN", 2025, laptops)
     assert out["band"] is None and out["assessment"].startswith("insufficient_comparables: 2 accepted")
-    assert server.price_band(1, "NGN", 2025, []) == {"error": "No candidate_ids given."}
+    assert server.price_band(1, "NGN", 2025, []) == {"error": "No candidate_ids or rejected records given."}
 
 
 def test_currency_conversion_and_missing_years():
@@ -130,7 +130,7 @@ def test_a_review_is_one_run_across_tool_calls():
     good, bundle = ids(HILUX), by_desc("Supply of 2 Toyota Hilux and 1 Toyota Prado")
     kenyan = ids("SELECT id FROM lines WHERE country = 'KE'")[0]
     refused = server.check_price_comparability(run, [kenyan])
-    assert refused["error"].startswith("Refused: none of the candidate") and str(kenyan) in refused["error"]
+    assert refused["error"].startswith("Refused: none of the records") and str(kenyan) in refused["error"]
     mixed = server.check_price_comparability(run, good + [kenyan], {str(kenyan): "x"})
     assert mixed["left_out"]["ids"] == [kenyan] and kenyan not in [r["id"] for r in mixed["accepted"] + mixed["excluded"]]
     band = server.check_price_comparability(run, good, {f"L{bundle}": "bundle"})
@@ -197,3 +197,13 @@ def test_the_briefs_named_data_problems_are_handled_openly():
         "SELECT description, buyer FROM lines WHERE description LIKE 'Office chair ergonomic _'")}
     assert buyers["Office chair ergonomic 0"] == "FEDERAL MINISTRY OF WORKS"  # recovered from the procuring entity
     assert buyers["Office chair ergonomic 5"] is None  # named nowhere in the record
+
+
+def test_judging_that_nothing_found_is_comparable_is_recorded():
+    """A model that rejects every record it found has reached a result: no benchmark exists."""
+    run = server.start_review("MRI scanner 3 Tesla", 2e9, year=2025)["run_id"]
+    found = server.find_comparables(run, ["hilux"])["results"]
+    nothing = server.check_price_comparability(run, [], {str(r["id"]): "not an MRI scanner" for r in found})
+    assert nothing["band"] is None and nothing["assessment"].startswith("insufficient_comparables: 0 accepted")
+    assert len(nothing["excluded"]) == len(found)
+    assert server.review(run)[2]["1"]["final"] == nothing  # recorded, so the report can say why

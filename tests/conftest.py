@@ -21,8 +21,8 @@ os.environ.update({
     "FAIRPRICE_REPORTS": str(TMP / "reports"),
     "FAIRPRICE_STORAGE": "file",
     "FAIRPRICE_REPORT_FORMAT": "xlsx",
-    "FAIRPRICE_OPEN_DRAFT": "0",
     "FAIRPRICE_MODEL": "ollama:gemma4",
+    "FAIRPRICE_NO_DOTENV": "1",  # never read the developer's .env (their model, keys or paths)
 })
 
 import pytest  # noqa: E402

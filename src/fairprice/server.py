@@ -186,8 +186,8 @@ def price_band(unit_price, currency, year, candidate_ids, rejected=None):
     """The band for a price from records judged comparable: excludes flagged records and duplicates, adjusts every
     price to `year` and `currency` (World Bank CPI and FX), and judges the price against the median."""
     rejected = {record_id(k): v for k, v in (rejected or {}).items()}
-    if not candidate_ids:
-        return {"error": "No candidate_ids given."}
+    if not candidate_ids and not rejected:
+        return {"error": "No candidate_ids or rejected records given."}
     ids = sorted(set(candidate_ids) | set(rejected))
     recs = rows(
         "SELECT l.*, r.source FROM lines l JOIN releases r USING (country, release_id) "
@@ -394,7 +394,8 @@ def check_price_comparability(run_id: str, candidate_ids: list[int], rejected: d
     The price, currency and year come from the review. The tool also excludes records with invalid dates,
     test entries, multi-item contracts, no unit price and duplicates, adjusts every price for inflation and
     currency, and needs at least 5 records for a band. Records not returned by this review's searches are left
-    out of the band and listed in left_out.
+    out of the band and listed in left_out. If none of the records found is comparable, send candidate_ids=[] with
+    each of them in rejected: the review then records that there is no benchmark.
     """
     run, entry, error = run_or_error(run_id, line)
     if error:
@@ -407,8 +408,8 @@ def check_price_comparability(run_id: str, candidate_ids: list[int], rejected: d
     strangers = sorted((set(candidates) | set(rejected)) - found)  # a mistyped id must not sink the other judgements
     candidates = [i for i in candidates if i in found]
     rejected = {k: v for k, v in rejected.items() if k in found}
-    if not candidates:
-        return {"error": f"Refused: none of the candidate records were returned by this review's searches"
+    if not candidates and not rejected:  # judging that nothing found is comparable is a result; judging nothing is not
+        return {"error": f"Refused: none of the records were returned by this review's searches"
                          f"{f' (not found by them: {strangers})' if strangers else ''}. Search with find_comparables first."}
     result = price_band(quoted(entry), run.request["currency"], run.request["year"], candidates,
                         {str(k): v for k, v in rejected.items()})
