@@ -138,7 +138,10 @@ def test_fairprices_own_review_runs_in_the_background(monkeypatch, tmp_path):
 
 
 def test_the_cli_as_a_thin_client(monkeypatch, capsys, tmp_path, answers):
-    replies = {"start_review": {"run_id": "r1", "lines": [{}]}, "review_with_fairprice": {"started": "r1"},
+    replies = {"start_review": {"run_id": "r1", "lines": [{}], "country": "NG", "currency": "NGN"},
+               "list_countries": {"countries": [{"code": "NG", "name": "Nigeria", "loaded": True},
+                                                {"code": "GH", "name": "Ghana", "loaded": False}]},
+               "review_with_fairprice": {"started": "r1"},
                "write_price_review": {"saved": "r1-report", "approved_by": "Ada Obi"},
                "review_status": iter([{"state": "running", "lines_checked": "0 of 1"},
                                       {"state": "done", "lines_checked": "1 of 1", "summary": "Line 1 ok"}])}
@@ -168,6 +171,7 @@ def test_the_cli_as_a_thin_client(monkeypatch, capsys, tmp_path, answers):
     agent.main()
     out = capsys.readouterr().out
     assert "Review r1 on http://x" in out and "1 of 1 lines checked" in out and '"approved_by": "Ada Obi"' in out
+    assert "Country: NG · prices in NGN" in out  # the only country loaded on the server
     assert seen[-1] == ("write_price_review", {"run_id": "r1", "approved_by": "Ada Obi"})
     replies["review_status"] = iter([{"state": "done", "lines_checked": "1 of 1", "summary": "ok"}])
     answers(["reject"])
@@ -178,7 +182,7 @@ def test_the_cli_as_a_thin_client(monkeypatch, capsys, tmp_path, answers):
     with pytest.raises(SystemExit, match="row 2: bad"):
         asyncio.run(agent.remote(argparse.Namespace(sheet=str(tmp_path / "t.csv"), currency=None, year=2025, country="NG")))
     assert seen[-1][1]["file"] == base64.b64encode(b"x").decode()
-    replies["start_review"] = {"run_id": "r2", "lines": [{}]}
+    replies["start_review"] = {"run_id": "r2", "lines": [{}], "country": "NG", "currency": "NGN"}
     replies["review_status"] = iter([{"state": "failed", "error": "boom"}])
     with pytest.raises(SystemExit, match="The review failed: boom"):
         asyncio.run(agent.remote(argparse.Namespace(sheet=None, item="x", unit_price=1, currency=None, year=2025,

@@ -5,7 +5,6 @@ import asyncio
 import json
 import uuid
 from types import SimpleNamespace
-from unittest import mock
 
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
@@ -243,13 +242,10 @@ def test_session_starts_both_mcp_servers_and_builds_the_database_when_missing(mo
     out = capsys.readouterr().out
     assert "-> fairprice.find_comparables" in out and "-> duckdb.execute_query" in out and '"saved"' in out
     assert "Cost of this run: " in out and "API fees $0.00 (local model)($" in out
-    built = []
-    monkeypatch.setattr(agent, "DB", str(tmp_path / "missing.duckdb"))
-    monkeypatch.setattr(agent.ingest, "main", lambda argv: built.append(argv))
-    monkeypatch.setattr(agent, "MultiServerMCPClient", mock.Mock(side_effect=RuntimeError("stop here")))
-    with pytest.raises(RuntimeError):
+    assert "Country: Nigeria (NG) · prices in NGN" in out
+    monkeypatch.setattr(agent, "DB", str(tmp_path / "missing.duckdb"))  # nothing loaded: say how, never download
+    with pytest.raises(SystemExit, match="fairprice-ingest --add NG"):
         asyncio.run(agent.session().__aenter__())
-    assert built == [[]]
 
 
 def test_show_draft_summary_for_a_single_item():
@@ -304,7 +300,7 @@ def test_check_setup_reports_each_part(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(agent, "engine", lambda: (_ for _ in ()).throw(RuntimeError("no database")))
     assert agent.check_setup() == 3
     out = capsys.readouterr().out
-    assert "✗ Model" in out and "• Procurement data: not built yet" in out and "downloads on the first run" in out
+    assert "✗ Model" in out and "• Procurement data: none loaded yet" in out and "fairprice-ingest --add NG" in out
     assert "uv sync --extra s3" in out and "Check FAIRPRICE_SQL_URL" in out and "3 problem(s)" in out
     monkeypatch.setattr("sys.argv", ["fairprice", "--check"])
     with pytest.raises(SystemExit) as code:
@@ -437,3 +433,23 @@ def test_context_window_probe(monkeypatch, capsys):
     monkeypatch.setattr(agent, "init_chat_model", lambda name, **kw: Model(2051))
     assert agent.check_setup() >= 1
     assert "The server cuts long conversations: it read only 2,051" in capsys.readouterr().out
+
+
+def test_one_country_per_run(monkeypatch, answers):
+    loaded = [("NG", "Nigeria"), ("KE", "Kenya")]
+    assert agent.pick_country("ke", loaded) == "KE"
+    with pytest.raises(SystemExit, match="RW is not loaded .*fairprice-ingest --add RW"):
+        agent.pick_country("rw", loaded)
+    with pytest.raises(SystemExit, match="fairprice-ingest --add NG"):
+        agent.pick_country("", [])
+    assert agent.pick_country("", [("KE", "Kenya")]) == "KE"  # the only one loaded: no question
+    offered = []
+    monkeypatch.setattr(agent, "choose", lambda prompt, options: offered.append(options) or options[0][0])
+    monkeypatch.setenv("FAIRPRICE_COUNTRY", "KE")
+    assert agent.pick_country("", loaded) == "KE" and offered[-1] == [("KE", "Kenya"), ("NG", "Nigeria")]
+    assert agent.country_line("NG", "NGN", loaded) == "Country: Nigeria (NG) · prices in NGN"
+
+
+def test_choose_accepts_any_case(answers):
+    answers(["ng"])
+    assert agent.choose("Country", [("NG", "Nigeria"), ("KE", "Kenya")]) == "NG"

@@ -252,13 +252,33 @@ def country_currency(country):
     return found[0]["currency"] if found else None
 
 
-def review_request(currency, year, country):
-    """A review's currency, year and country; the currency defaults to the country's. None if not loaded."""
-    currency = (currency or country_currency(country) or "").upper()
-    return {"currency": currency, "year": year or dt.date.today().year, "country": country.upper()} if currency else None
+def loaded_countries():
+    """[(code, name)] of the countries whose data is loaded, the first loaded first; [] before any is."""
+    try:
+        found = rows("SELECT country, min(split_part(title, ':', 1)) AS name FROM sources WHERE country IS NOT NULL "
+                     "GROUP BY country ORDER BY min(position)")
+    except duckdb.Error:  # no database yet
+        return []
+    return [(r["country"], r["name"].strip()) for r in found]
+
+
+def review_request(currency, year, country=""):
+    """A review's currency, year and country: one country, by default FAIRPRICE_COUNTRY or else the first loaded;
+    the currency defaults to the country's. None if that country is not loaded."""
+    loaded = dict(loaded_countries())
+    code = (country or os.environ.get("FAIRPRICE_COUNTRY") or next(iter(loaded), "")).upper()
+    if code not in loaded:
+        return None
+    return {"currency": (currency or country_currency(code) or "").upper(), "year": year or dt.date.today().year,
+            "country": code}
 
 
 NOT_LOADED = "Country {} is not loaded, so it has no currency or past prices. See list_countries; add it with add_country."
+NO_COUNTRY = "No country's data is loaded yet. Load one with add_country; list_countries shows the codes."
+
+
+def not_loaded(country):
+    return NOT_LOADED.format(country.upper()) if country else NO_COUNTRY
 
 
 # ---------------------------------------------------------------- runs: one review across many calls
@@ -281,19 +301,20 @@ def quoted(entry):
 
 @tool
 def start_review(item: str, unit_price: float, currency: str = "", year: int | None = None,
-                 country: str = "NG") -> dict:
+                 country: str = "") -> dict:
     """Start a price review of one item: what is being bought and the price quoted for it. Returns its run_id;
     every other step of the review uses it, and is recorded under it, so the report is built only from what
     this review's own searches and checks found.
 
     currency: of the quoted price (default the country's currency).
     year: when the price was quoted (default this year); past prices are adjusted for inflation to it.
-    country: ISO code of a loaded country whose past awards to compare with (see list_countries).
+    country: ISO code of a loaded country whose past awards to compare with (default: the server's default country,
+    else the first loaded; see list_countries). A review covers one country.
     """
     if not item.strip() or unit_price <= 0:
         return {"error": "Give the item and a quoted unit price above zero."}
     if (request := review_request(currency, year, country)) is None:
-        return {"error": NOT_LOADED.format(country.upper())}
+        return {"error": not_loaded(country)}
     lines = [{"line": "1", "item": item.strip(), "quantity": None, "prices": {"Price under review": unit_price}}]
     run_id = start_run("item", item.strip(), request, lines, ["Price under review"])
     return {"run_id": run_id, "lines": lines, **request,
@@ -302,7 +323,7 @@ def start_review(item: str, unit_price: float, currency: str = "", year: int | N
 
 @tool
 def start_package_review(package: dict | None = None, title: str = "", currency: str = "", year: int | None = None,
-                         country: str = "NG", file: str = "", filename: str = "") -> dict:
+                         country: str = "", file: str = "", filename: str = "") -> dict:
     """Start a review of a whole bid package: its bill of quantities and every bidder's price schedule, in the bid
     package format (bid_package.schema.json: {"boq": [{line, item, unit, quantity, budget}], "bids": [{bidder,
     lines: [{line, unit_price, quantity, total}]}]}). A package that does not match is refused with every problem.
@@ -328,7 +349,7 @@ def start_package_review(package: dict | None = None, title: str = "", currency:
     checks = batch.file_checks(boq, bidders)
     lines = batch.package_lines(boq, bidders)
     if (request := review_request(currency, year, country)) is None:
-        return {"error": NOT_LOADED.format(country.upper())}
+        return {"error": not_loaded(country)}
     run_id = start_run("package", title or "bid package", request, lines, list(bidders), checks)
     return {"run_id": run_id, "lines": lines, "bidders": list(bidders), **request,
             "bid_file_problems": len(checks)}

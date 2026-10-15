@@ -32,7 +32,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 from sqlalchemy import select
 
-from fairprice import ingest, prices, report
+from fairprice import prices, report
 from fairprice.db import AUDIT_LOG, add_step, audit, engine, get_run
 from fairprice.server import MIN_COMPARABLES, record_id
 from fairprice.storage import storage
@@ -376,10 +376,11 @@ def choose(prompt, options):
     n, i = len(options), 0
     if not sys.stdin.isatty() or sys.platform == "win32":
         names = [v for v, _ in options]
+        by_answer = {v.lower(): v for v in names}
         while True:
             answer = input(f"{prompt} [{' / '.join(names)}]: ").strip().lower()
-            if answer in names:
-                return answer
+            if answer in by_answer:
+                return by_answer[answer]
             if answer.isdigit() and 1 <= int(answer) <= n:
                 return names[int(answer) - 1]
 
@@ -549,7 +550,7 @@ def check_setup():
             records, countries = con.execute("SELECT count(*), string_agg(DISTINCT country, ', ' ORDER BY country) FROM lines").fetchone()
         show(True, f"Procurement data: {records:,} records ({countries})")
     else:
-        show(None, "Procurement data: not built yet; the first run downloads about 60 MB, or run `uv run fairprice-ingest`")
+        show(None, "Procurement data: none loaded yet. " + NO_DATA)
     cached = borrowed_args()[0] == "--offline"
     show(True if cached else None, "Borrowed DuckDB MCP server: " + ("cached" if cached else "downloads on the first run (needs internet once)"))
     try:
@@ -608,12 +609,37 @@ class Usage(BaseCallbackHandler):
                 f"{c['output_tokens']:,} output tokens, {c['model_seconds']:.0f} s of model time, API fees {fees}")
 
 
+NO_DATA = ("Load a country's procurement data first, e.g. Nigeria: uv run fairprice-ingest --add NG "
+           "(uv run fairprice-ingest --list shows every country and its code).")
+
+
+def pick_country(given, loaded):
+    """One country per run: the one given, the only one loaded, or the person's choice from those loaded.
+    loaded: [(code, name)], the default (FAIRPRICE_COUNTRY, else the first loaded) is offered first."""
+    if not loaded:
+        raise SystemExit(NO_DATA)
+    names = dict(loaded)
+    if given:
+        if given.upper() not in names:
+            raise SystemExit(f"{given.upper()} is not loaded (loaded: {', '.join(names)}). "
+                             f"Load it with: uv run fairprice-ingest --add {given.upper()}")
+        return given.upper()
+    if len(loaded) == 1:
+        return loaded[0][0]
+    default = os.environ.get("FAIRPRICE_COUNTRY", "").upper()
+    ordered = sorted(loaded, key=lambda c: c[0] != default)
+    return choose("Country to compare with", ordered)
+
+
+def country_line(code, currency, loaded):
+    return f"Country: {dict(loaded).get(code, code)} ({code}) · prices in {currency}"
+
+
 @contextlib.asynccontextmanager
 async def session(model_name=MODEL):
     """Connect both MCP servers and the model; yield the compiled graph and our own tools by name."""
     if not Path(DB).exists():
-        print("First run: building the local database (about a minute)...")
-        ingest.main([])
+        raise SystemExit(NO_DATA)
     client = MultiServerMCPClient(servers(), tool_interceptors=[audit_interceptor])
     own_tools = await client.get_tools(server_name="fairprice")
     borrowed_tools = await client.get_tools(server_name="duckdb")
@@ -627,7 +653,11 @@ async def session(model_name=MODEL):
 
 async def run(args):
     global CURRENT_RUN
+    from fairprice import server
     usage = Usage()
+    loaded = server.loaded_countries()
+    if not args.resume:
+        args.country = pick_country(args.country, loaded)
     async with session() as (graph, tools):
         if args.resume:
             run_id, payload = args.resume, None
@@ -642,7 +672,7 @@ async def run(args):
                    "currency": started["currency"], "year": started["year"], "country": started["country"]}
             payload = {"request": req}
             audit(run_id, event="run_started", request=req, model=MODEL)
-            print(f"Run {run_id} | model {MODEL}")
+            print(f"Run {run_id} | model {MODEL}\n{country_line(started['country'], started['currency'], loaded)}")
         CURRENT_RUN = run_id
         config = {"configurable": {"thread_id": run_id}, "callbacks": [usage]}
         while True:
@@ -695,6 +725,9 @@ async def remote(args):
 
     async def call(name, **arguments):
         return as_json(tool_text(await tools[name].ainvoke(arguments)))
+    if not args.country:
+        listed = (await call("list_countries")).get("countries", [])
+        args.country = pick_country("", [(c["code"], c["name"]) for c in listed if c.get("loaded")])
     where = {"currency": args.currency or "", "year": args.year, "country": args.country}
     if args.sheet:
         started = await call("start_package_review", file=base64.b64encode(Path(args.sheet).read_bytes()).decode(),
@@ -704,7 +737,8 @@ async def remote(args):
     if "error" in started:
         raise SystemExit("\n".join([started["error"], *(f"  - {p}" for p in started.get("problems", []))]))
     run_id = started["run_id"]
-    print(f"Review {run_id} on {url}: {len(started['lines'])} line(s). Reviewing on the server…", flush=True)
+    print(f"Review {run_id} on {url}: {len(started['lines'])} line(s). Reviewing on the server…\n"
+          f"Country: {started['country']} · prices in {started['currency']}", flush=True)
     await call("review_with_fairprice", run_id=run_id)
     seen = None
     while True:
@@ -734,7 +768,7 @@ def main():
     p.add_argument("--unit-price", type=float)
     p.add_argument("--currency", help="currency of the quoted prices, e.g. NGN, KES, RWF (default: the country's)")
     p.add_argument("--year", type=int, default=dt.date.today().year)
-    p.add_argument("--country", default="NG", help="ISO code of a loaded country (see fairprice-ingest --list)")
+    p.add_argument("--country", help="ISO code of a loaded country to compare with (default: you pick from those loaded)")
     p.add_argument("--package", "--sheet", dest="sheet", metavar="FILE",
                    help="a bid package (.xlsx, .csv or .json) to review line by line; see README")
     p.add_argument("--review", metavar="RUN_ID", help=argparse.SUPPRESS)  # the server's background review

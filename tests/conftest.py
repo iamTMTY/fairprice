@@ -158,11 +158,11 @@ def write_sources():
 
 @pytest.fixture(scope="session", autouse=True)
 def database():
-    """Build the test database once: a fresh install (Kenya and Nigeria), then Rwanda added by code."""
+    """Build the test database once: Nigeria, Kenya and Rwanda, each added by its code."""
     write_sources()
     with offline_registry():
-        ingest.main([])
-        ingest.main(["--add", "RW"])
+        for code in ("NG", "KE", "RW"):  # one country at a time, by code; Nigeria first, so it is the default
+            ingest.main(["--add", code])
     yield ingest.DB
     shutil.rmtree(TMP, ignore_errors=True)
 

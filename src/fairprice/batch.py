@@ -362,12 +362,16 @@ async def run(args):
     lines = package_lines(boq, bidders)
     checks = file_checks(boq, bidders)  # each with its sheet and row
     names = list(bidders)
+    loaded = server.loaded_countries()
+    if not args.resume:
+        args.country = agent.pick_country(args.country, loaded)
     base = server.review_request(args.currency, args.year, args.country)
     if base is None:
-        raise SystemExit(server.NOT_LOADED.format(args.country.upper()))
+        raise SystemExit(server.not_loaded(args.country))
     run_id = args.resume if args.resume and get_run(args.resume) else start_run(
         "package", Path(args.sheet).name, base, lines, names, checks)
-    print(f"Review {run_id} | model {agent.MODEL} | {len(lines)} lines, {len(bidders)} bidders")
+    print(f"Review {run_id} | model {agent.MODEL} | {len(lines)} lines, {len(bidders)} bidders\n"
+          f"{agent.country_line(base['country'], base['currency'], loaded)}")
     agent.audit(run_id, event="run_started", sheet=str(args.sheet), bidders=names, lines=len(lines),
                 file_checks=checks, model=agent.MODEL)
 

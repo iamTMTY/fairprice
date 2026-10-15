@@ -142,6 +142,7 @@ def test_full_package_run_with_revise_and_approve(session, answers, capsys, monk
     asyncio.run(batch.run(args))
     out = capsys.readouterr().out
     assert "Read bid-package.csv: BoQ with 3 lines, 3 bidders" in out and "Problems in the bid files: 4" in out
+    assert "Country: Nigeria (NG) · prices in NGN" in out
     assert '"saved"' in out and "bid-package" in out
     answers(["reject"])
     asyncio.run(batch.run(args))
@@ -152,7 +153,7 @@ def test_full_package_run_with_revise_and_approve(session, answers, capsys, monk
     asyncio.run(batch.run(argparse.Namespace(**{**vars(args), "resume": run})))
     out = capsys.readouterr().out
     assert f"Review {run} |" in out and "reusing the finished result" in out
-    with pytest.raises(SystemExit, match="Country ZZ is not loaded"):
+    with pytest.raises(SystemExit, match="ZZ is not loaded"):
         asyncio.run(batch.run(argparse.Namespace(**{**vars(args), "country": "zz", "currency": None})))
     bad = argparse.Namespace(**{**vars(args), "sheet": str(EXAMPLES / "missing.txt")})
     with pytest.raises(SystemExit, match="was not read"):

@@ -23,7 +23,7 @@ Tested on macOS (Apple M5, 16 GB RAM). You need:
 
 - about 12 GB of free disk space (10 GB for the model, 2 GB for the database);
 - 16 GB of RAM;
-- an internet connection for setup and the first run only.
+- an internet connection for setup and for loading a country's data.
 
 ### 1. Install uv (the Python package manager)
 
@@ -108,7 +108,7 @@ uv run fairprice --check
 
 ```
 ✓ Model ollama:gemma4 at http://localhost:11434
-• Procurement data: not built yet; the first run downloads about 60 MB, or run `uv run fairprice-ingest`
+• Procurement data: none loaded yet. Load a country's procurement data first, e.g. Nigeria: uv run fairprice-ingest --add NG …
 • Borrowed DuckDB MCP server: downloads on the first run (needs internet once)
 ✓ Reports: local storage, xlsx files
 ✓ Database for runs, reports and the audit log: reachable
@@ -117,18 +117,43 @@ Ready.
 
 Anything marked ✗ comes with the fix, for example `Ollama is not reachable at http://localhost:11434 … Install it from https://ollama.com/download and open it, or set OLLAMA_HOST to where it runs` or `Run ollama pull gemma4`. Every run makes the same check first and stops with the same message instead of failing halfway.
 
-### 5. Run it
+### 5. Load a country's data
+
+FairPrice loads nothing until you choose a country, by its ISO code:
+
+```bash
+uv run fairprice-ingest --add NG     # Nigeria: about 16 MB, under a minute
+```
+
+| Code | Country | What its published data supports |
+|---|---|---|
+| `NG` | Nigeria (13 publications: federal BPP, 11 states, Budeshi) | Prices per item for single-item contracts. **Start here.** |
+| `KE` | Kenya (PPRA, Makueni County) | Award totals only: searchable, but no prices per item |
+| `RW` | Rwanda (RPPA) | A price for each contract item (tested) |
+| `GH` | Ghana | Not tested yet |
+| `LR` | Liberia | Not tested yet |
+| `TZ` | Tanzania | Not tested yet |
+| `UG` | Uganda | Not tested yet |
+| `ZA` | South Africa | Not tested yet |
+| `ZM` | Zambia | Not tested yet |
+
+`uv run fairprice-ingest --list` shows all 72 countries on the registry with their codes. What a country's data can support is detected when it is loaded (see the table below).
+
+The first command also creates a local Python environment in `.venv/` and installs the packages (under a minute). After loading, everything runs offline.
+
+### 6. Run it
 
 ```bash
 uv run fairprice "Toyota Hilux double cabin pickup" --unit-price 120000000 --year 2025
 ```
 
-That is the one command. The first time, it also:
+A run compares against **one country**. With one country loaded it uses that one; with several, it asks, with the same arrow-key menu as the decision at the end (or give `--country NG`). It then says which:
 
-1. creates a local Python environment in `.venv/` and installs the packages (under a minute);
-2. downloads about 60 MB of public procurement data (every Nigerian and Kenyan publication) and builds a local database in `data/` (a few minutes).
+```
+Country: Nigeria (NG) · prices in NGN
+```
 
-After that, everything runs offline. Each item takes about 2 minutes on the laptop above.
+Each item takes about 2 minutes on the laptop above.
 
 **Cost of a run.** Every run ends with what it cost, for example:
 
@@ -237,7 +262,7 @@ uv run fairprice --package file.xlsx --resume <batch id>  # rerun a package, reu
 uv run pytest --cov                                      # unit and integration tests, with coverage (about 40 s, no model needed)
 uv run fairprice-evals --repeats 2                       # run the eval suite (see EVALS.md); about an hour
 uv run fairprice-evals --cases bid-package --repeats 1   # run one eval case
-uv run fairprice-ingest                                  # rebuild the database from the loaded publications
+uv run fairprice-ingest --rebuild                        # rebuild the database from the files already downloaded
 FAIRPRICE_MODEL=ollama:qwen3:8b uv run fairprice ...     # use another model (ollama pull qwen3:8b first)
 uv run fairprice --audit <run or batch id>               # print a run's audit log: every tool call and decision
 ```
@@ -257,6 +282,7 @@ Put settings in a `.env` file next to `pyproject.toml` (copy `.env.example`, whi
 | `FAIRPRICE_REPORT_FORMAT` | `xlsx` | The report file format: `xlsx`, `csv` or `json`. `--format` overrides it for one run. |
 | `OLLAMA_HOST` | `http://localhost:11434` | Where Ollama runs, if not on this computer. |
 | `FAIRPRICE_MODEL` | `ollama:gemma4` | The model, as `provider:model`. |
+| `FAIRPRICE_COUNTRY` | none | The country offered first in the menu, and the one an app gets when it names none (otherwise the first loaded). |
 | `FAIRPRICE_MODEL_URL`, `FAIRPRICE_MODEL_API_KEY` | none | Your OpenAI-compatible server, for `FAIRPRICE_MODEL=openai:<name>` (see step 2). |
 | `FAIRPRICE_PRICE_PER_MILLION_INPUT_TOKENS`, `…_OUTPUT_TOKENS` | OpenRouter's price | Your own price in US dollars per million tokens, instead of OpenRouter's list. |
 
@@ -328,7 +354,8 @@ uv run fairprice --package package.xlsx --year 2025    # uploads it; the server'
 |---|---|
 | `Ollama is not reachable at …` | Ollama is not running, or runs elsewhere. Open the Ollama app, run `ollama serve`, or set `OLLAMA_HOST`. `uv run fairprice --check` shows what is wrong. |
 | `model "gemma4" not found` | Run `ollama pull gemma4`. |
-| The first run stops while downloading or building | Run the same command again. Finished downloads are kept; an unfinished build starts over. |
+| Loading a country stops while downloading or building | Run the same command again. Finished downloads are kept; an unfinished build starts over. |
+| `Load a country's procurement data first` | Nothing is loaded yet: `uv run fairprice-ingest --add NG` (or another code from the table in step 5). |
 | `… was not read: it does not match the bid package format` | Fix each listed problem; the templates in `examples/` show the exact layout. |
 | `Connection closed` when a run starts | One of the two MCP servers did not start. The borrowed DuckDB server writes its messages to `data/duckdb-server.log` instead of the screen; the reason is usually there. |
 | A run is very slow | About 2 minutes per item is normal on a laptop. Keep the computer awake and plugged in. |
@@ -367,7 +394,7 @@ The tests prove the code does what it should. They do not measure how good the m
 
 ## Add a country
 
-Out of the box, FairPrice loads Nigeria and Kenya. Any country with data on the [OCP Data Registry](https://data.open-contracting.org/en/search/) can be added by its ISO country code:
+Nothing is loaded until you add a country. Any country with data on the [OCP Data Registry](https://data.open-contracting.org/en/search/) can be added by its ISO country code (sample codes in step 5):
 
 ```bash
 uv run fairprice-ingest --list       # countries with data, and which are loaded
@@ -394,7 +421,7 @@ Whether a country can give prices per item depends on what it publishes. FairPri
 ## Data and its limits
 
 - **We built on the real-data half.** The price benchmarks come from real published awards. Bid evaluation needs documents nobody publishes (bids, price schedules, tender files), so the bid packages in the examples and evals are synthetic and labelled as such. FairPrice reads price schedules, not full bid documents.
-- **Nigeria** (federal BPP and its states) and **Kenya** (PPRA and Makueni County) are loaded by default, and the evals use them. Other countries can be added as above.
+- The evals use **Nigeria** (federal BPP and its states) and **Kenya** (PPRA and Makueni County). Any other country can be added as above.
 - No live tenders and no personal data. Reports show buying agencies, never supplier names.
 
 ## Data quality: what the published data gets wrong, and what FairPrice does
@@ -422,7 +449,7 @@ Every exclusion is listed in the report's Sources sheet with its reason, so a co
 
 - Works end to end on real data with Gemma 4 run locally (default), and with Qwen3 8B.
 - Small open models still make mistakes, such as searching with keywords that are too broad. The self-check catches some of these; EVALS.md shows what remains.
-- Nigeria and Kenya are loaded by default. Others can be added with `fairprice-ingest --add`; Rwanda has been tested this way, but the evals cover Nigeria and Kenya only.
+- Countries are loaded by code (`fairprice-ingest --add NG`). Rwanda has also been tested, but the evals cover Nigeria and Kenya only.
 - Item matching uses keywords, not a product classification. This is the biggest limit on accuracy, and long BoQ descriptions make it worse.
 - Tested on macOS only.
 
