@@ -12,3 +12,6 @@ data/ingest*
 .DS_Store
 .coverage
 .pytest_cache/
+data/reviews/
+data/duckdb-server.log
+data/model-prices.json

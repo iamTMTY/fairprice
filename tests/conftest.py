@@ -21,8 +21,8 @@ os.environ.update({
     "FAIRPRICE_REPORTS": str(TMP / "reports"),
     "FAIRPRICE_STORAGE": "file",
     "FAIRPRICE_REPORT_FORMAT": "xlsx",
-    "FAIRPRICE_OPEN_DRAFT": "0",
     "FAIRPRICE_MODEL": "ollama:gemma4",
+    "FAIRPRICE_NO_DOTENV": "1",  # never read the developer's .env (their model, keys or paths)
 })
 
 import pytest  # noqa: E402
@@ -30,7 +30,13 @@ from langchain_core.language_models import BaseChatModel  # noqa: E402
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage  # noqa: E402
 from langchain_core.outputs import ChatGeneration, ChatResult  # noqa: E402
 
-from fairprice import ingest  # noqa: E402
+from fairprice import ingest, prices  # noqa: E402
+
+prices.CACHE = TMP / "model-prices.json"  # tests never fetch prices: a fixed list, dated today
+prices.CACHE.write_text(json.dumps({"fetched": __import__("datetime").date.today().isoformat(),
+                                    "models": {"google/gemma-4-26b-a4b-it": [9e-8, 3e-7],
+                                               "google/gemma-4-31b-it": [2e-7, 4e-7],
+                                               "openai/gpt-4o-mini": [1.5e-7, 6e-7]}}))
 
 ingest.RAW, ingest.MANIFEST, ingest.STATUS = TMP / "raw", TMP / "raw" / "manifest.json", TMP / "ingest-status.json"
 SOURCE = TMP / "registry"  # the "downloads" the mocked registry serves
@@ -38,8 +44,9 @@ SOURCE = TMP / "registry"  # the "downloads" the mocked registry serves
 
 # ---------------------------------------------------------------- synthetic publications
 
-def release(prefix, n, buyer, date, award=None, contract=None):
-    doc = {"ocid": f"{prefix}-{n:04d}", "id": f"{prefix}-{n:04d}-r1", "date": date, "buyer": {"name": buyer}}
+def release(prefix, n, buyer, date, award=None, contract=None, extra=None):
+    doc = {"ocid": f"{prefix}-{n:04d}", "id": f"{prefix}-{n:04d}-r1", "date": date, "buyer": {"name": buyer},
+           **(extra or {})}
     if award:
         doc["awards"] = [award]
     if contract:
@@ -51,7 +58,7 @@ def nigeria():
     """Single-item contracts with quantities (read per contract), plus the traps the agent must handle."""
     docs, n = [], 0
 
-    def add(description, qty, amount, year, buyer="FEDERAL MINISTRY OF WORKS", items=None):
+    def add(description, qty, amount, year, buyer="FEDERAL MINISTRY OF WORKS", items=None, entity=None):
         nonlocal n
         n += 1
         items = items or [{"id": "1", "description": description, "quantity": qty}]
@@ -59,7 +66,8 @@ def nigeria():
                  "value": {"amount": amount, "currency": "NGN"}, "suppliers": [{"name": "Supplier Ltd"}]}
         contract = {"id": f"c{n}", "awardID": f"a{n}", "title": description, "dateSigned": f"{year}-05-02T00:00:00Z",
                     "value": {"amount": amount, "currency": "NGN"}, "items": items}
-        docs.append(release("ocds-tstng1", n, buyer, f"{year}-05-01T00:00:00Z", award, contract))
+        docs.append(release("ocds-tstng1", n, buyer, f"{year}-05-01T00:00:00Z", award, contract,
+                            {"tender": {"procuringEntity": {"name": entity}}} if entity else None))
 
     for i, (price, year) in enumerate([(80e6, 2024), (85e6, 2024), (88e6, 2023), (90e6, 2023), (92e6, 2022),
                                        (95e6, 2022), (100e6, 2021)]):
@@ -72,6 +80,13 @@ def nigeria():
         items=[{"id": "1", "description": "Laptop", "quantity": 5}, {"id": "2", "description": "Printer", "quantity": 2}])
     for i, price in enumerate([2.0e6, 2.2e6]):
         add(f"Laptop computer core i5 batch {i}", 10, price * 10, 2024)
+    # the brief's named problems: an extreme value, values of zero and below 1, and missing buyer names
+    for i, price in enumerate([50e3, 52e3, 48e3, 51e3, 49e3, 50.5e3]):
+        add(f"Office chair ergonomic {i}", 10, price * 10, 2024, buyer="" if i in (0, 5) else "FEDERAL MINISTRY OF WORKS",
+            entity="FEDERAL MINISTRY OF WORKS" if i == 0 else None)  # chair 0 names its buyer elsewhere; 5 nowhere
+    add("Office chair ergonomic deluxe", 1, 5e6, 2024)  # 100 times the others: a typing error
+    add("Office chair ergonomic damaged", 10, 0, 2024)  # a value of zero
+    add("Office chair ergonomic spare", 1e6, 500, 2024)  # a price per item below 1
     return docs
 
 
@@ -143,11 +158,11 @@ def write_sources():
 
 @pytest.fixture(scope="session", autouse=True)
 def database():
-    """Build the test database once: a fresh install (Kenya and Nigeria), then Rwanda added by code."""
+    """Build the test database once: Nigeria, Kenya and Rwanda, each added by its code."""
     write_sources()
     with offline_registry():
-        ingest.main([])
-        ingest.main(["--add", "RW"])
+        for code in ("NG", "KE", "RW"):  # one country at a time, by code; Nigeria first, so it is the default
+            ingest.main(["--add", code])
     yield ingest.DB
     shutil.rmtree(TMP, ignore_errors=True)
 
@@ -192,20 +207,18 @@ class ScriptedModel(BaseChatModel):
                 msg = AIMessage(text + (self.verdict or "The band looks odd."))
             return ChatResult(generations=[ChatGeneration(message=msg)])
         item = re.search(r"Item under review: (.+)", system).group(1).strip()
-        country = re.search(r"Country of the data to search: (\w+)", system).group(1)
-        price = float(re.search(r"Price under review: ([\d.]+)", system).group(1))
         last = messages[-1]
+        first = self.keywords.get(item, [item.split()[0]])
         searches = sum(t.name == "find_comparables" for t in tools)
-        if isinstance(last, HumanMessage) or not tools:
-            words = self.keywords.get(item, [item.split()[0]]) if searches == 0 else [item.split()[-1]]
-            msg = call("find_comparables", {"keywords": words, "country": country})
+        if not any(t.name == "plan_searches" for t in tools):
+            msg = call("plan_searches", {"searches": [first, [item.split()[-1]]], "notes": "reject bundles"})
+        elif isinstance(last, HumanMessage) or last.name == "plan_searches":
+            msg = call("find_comparables", {"keywords": first if searches == 0 else [item.split()[-1]]})
         elif last.name == "find_comparables" and not self.stop_after_search:
             from fairprice.agent import tool_text  # MCP tools return content blocks, not plain text
             found = json.loads(tool_text(last))["results"]
             reject = {str(r["id"]): "bundle" for r in found if any(w in r["description"] for w in self.reject)}
-            msg = call("check_price_comparability", {"unit_price": price, "currency": "NGN" if country == "NG" else
-                                                     {"KE": "KES", "RW": "RWF"}.get(country, "NGN"), "year": 2025,
-                                                     "candidate_ids": [r["id"] for r in found if str(r["id"]) not in reject],
+            msg = call("check_price_comparability", {"candidate_ids": [r["id"] for r in found if str(r["id"]) not in reject],
                                                      "rejected": reject})
         else:
             msg = AIMessage("I searched, kept the comparable records and checked the price [L1].")
@@ -250,7 +263,8 @@ async def fake_session(model):
 
     from fairprice import agent, server
     SAVER = SAVER or InMemorySaver()
-    tools = [as_tool(f) for f in (server.find_comparables, server.check_price_comparability,
+    tools = [as_tool(f) for f in (server.start_review, server.start_package_review, server.plan_searches,
+                                  server.find_comparables, server.check_price_comparability, server.challenge_review,
                                   server.write_price_review, server.get_price_review)]
     yield agent.build_graph(tools, [StructuredTool.from_function(execute_query)], model, SAVER), {t.name: t for t in tools}
 

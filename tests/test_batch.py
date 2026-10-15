@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,9 +11,9 @@ import pytest
 from openpyxl import load_workbook
 
 from conftest import ScriptedModel, fake_session
-from fairprice import batch
+from fairprice import batch, db, server
 
-EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
+EXAMPLES = Path(__file__).resolve().parents[1] / "evals" / "packages"  # the eval's 3-line package, in each form
 
 
 @pytest.mark.parametrize("ext", ["xlsx", "csv", "json"])
@@ -35,12 +36,15 @@ def refused(path):
 
 def test_refusals_name_the_problem_and_where_it_is(tmp_path):
     wb = load_workbook(EXAMPLES / "bid-package.xlsx")
-    wb["Bidder B"]["B1"] = "Rate"
-    wb["Bidder A"]["E2"] = "stray"  # a value under no heading
+    wb["Bidder B"]["E1"] = "Price per piece"
+    wb["Bidder A"]["G2"] = "stray"  # a value under no heading
+    wb["Bidder C"]["C1"] = "Rate"  # a second unit price column
     wb.save(tmp_path / "a.xlsx")
     problems = refused(tmp_path / "a.xlsx")
-    assert "sheet “Bidder B”, row 1: unknown column(s) rate" in problems and "missing column(s) unit_price" in problems
+    assert "sheet “Bidder B”, row 1: unknown column(s) Price per piece" in problems
+    assert "missing column(s) Unit Price" in problems and "the columns are Item No, Description" in problems
     assert "sheet “Bidder A”, row 2: a value in a column with no name" in problems
+    assert "sheet “Bidder C”, row 1: more than one column for Unit Price" in problems
     wb = load_workbook(EXAMPLES / "bid-package.xlsx")
     wb.remove(wb["BoQ"])
     wb.create_sheet("Empty")
@@ -50,9 +54,9 @@ def test_refusals_name_the_problem_and_where_it_is(tmp_path):
 
 
 def test_csv_refusals(tmp_path):
-    head = "bidder,line,item,quantity,unit_price,total\n"
-    cases = {"BoQ,1,Laptop,2,,\nBidder A,1,,2,NGN 5,\n": "row 3, unit_price: 'NGN 5' is not a number",
-             "BoQ,1,Laptop,2,5,\n": "a BoQ row has no unit_price",
+    head = "Tenderer,Item No.,Description,Qty,Rate in KES (VAT inclusive),Total Amount (KES)\n"  # KRA's headings
+    cases = {"BoQ,1,Laptop,2,,\nBidder A,1,,2,NGN 5,\n": "row 3, Rate in KES (VAT inclusive): 'NGN 5' is not a number",
+             "BoQ,1,Laptop,2,5,\n": "a BoQ row has no Unit Price",
              ",1,Laptop,2,,\n": "no bidder (write BoQ",
              "Bidder A,1,,2,5,\n": "no BoQ rows",
              "BoQ,1,Laptop,2,,\nBoQ,1,Laptop,2,,\nBidder A,1,,2,5,\nBidder A,1,,2,6,\nBidder A,7,,2,6,\n":
@@ -83,6 +87,16 @@ def test_json_refusals(tmp_path):
     assert "was not read: it does not match the bid package format" in str(e.value)
 
 
+def test_ppra_headings_and_budgets():
+    for heading, field in (("Item No.", "line"), ("Rate in KES (VAT inclusive)", "unit_price"), ("QTY", "quantity"),
+                           ("Total Amount (KES)", "total"), ("Budget per unit (KES)", "budget"), ("Tenderer", "bidder")):
+        assert batch.FIELD[batch.plain(heading)] == field
+    assert batch.plain("price in words") not in batch.FIELD
+    boq, bidders = batch.read_package(EXAMPLES / "bid-package.xlsx")
+    assert boq[1]["unit"] == "No" and boq[1]["budget"] == 2400000
+    assert batch.package_lines(boq, bidders)[1]["budget"] == 2400000
+
+
 def test_cells_read_as_written():
     problems = []
     assert batch.cell("2,500,000", "x", problems, True) == 2500000.0
@@ -99,10 +113,12 @@ def test_analyse_once_per_item_reuses_finished_lines_and_isolates_failures(capsy
              {"line": "4", "item": "Laptop computer", "quantity": 1, "prices": {"A": 2e6}}]
     base = {"currency": "NGN", "year": 2025, "country": "NG"}
 
+    run = db.start_run("package", "analyse", base, lines, ["A"])
+
     async def go():
         async with fake_session(ScriptedModel(keywords={"Toyota Hilux double cabin pickup": ["hilux"]})) as (graph, _):
-            first = await batch.analyse(graph, lines, base, "an1")
-            again = await batch.analyse(graph, lines, base, "an1", only=["4"])
+            first = await batch.analyse(graph, lines, base, run)
+            again = await batch.analyse(graph, lines, base, run, only=["4"])
 
             class Broken:
                 async def aget_state(self, config):
@@ -110,12 +126,14 @@ def test_analyse_once_per_item_reuses_finished_lines_and_isolates_failures(capsy
 
                 async def ainvoke(self, *a, **k):
                     raise RuntimeError("model went away")
-            failed = await batch.analyse(Broken(), lines[:1], base, "an2")
+            failed = await batch.analyse(Broken(), lines[:1], base, db.start_run("package", "x", base, lines, ["A"]))
             return first, again, failed
     first, again, failed = asyncio.run(go())
     assert first["1"] is first["2"] and "3" not in first and first["4"]["final"]["band"] is None
     assert "reusing the finished result" in capsys.readouterr().out and set(again) == {"4"}
     assert failed["1"]["error"].startswith("RuntimeError")
+    replayed = server.review(run)[2]  # the report is rebuilt from the run's recorded steps
+    assert replayed["1"]["final"] == first["1"]["final"] and replayed["2"] is replayed["1"] and "3" not in replayed
 
 
 def test_full_package_run_with_revise_and_approve(session, answers, capsys, monkeypatch):
@@ -124,10 +142,45 @@ def test_full_package_run_with_revise_and_approve(session, answers, capsys, monk
     asyncio.run(batch.run(args))
     out = capsys.readouterr().out
     assert "Read bid-package.csv: BoQ with 3 lines, 3 bidders" in out and "Problems in the bid files: 4" in out
+    assert "Country: Nigeria (NG) · prices in NGN" in out
     assert '"saved"' in out and "bid-package" in out
     answers(["reject"])
     asyncio.run(batch.run(args))
-    assert "Not saved: the reviewer rejected the draft." in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "Not saved: the reviewer rejected it." in out
+    run = re.search(r"Review (\w+) \|", out).group(1)
+    answers(["reject"])
+    asyncio.run(batch.run(argparse.Namespace(**{**vars(args), "resume": run})))
+    out = capsys.readouterr().out
+    assert f"Review {run} |" in out and "reusing the finished result" in out
+    with pytest.raises(SystemExit, match="ZZ is not loaded"):
+        asyncio.run(batch.run(argparse.Namespace(**{**vars(args), "country": "zz", "currency": None})))
     bad = argparse.Namespace(**{**vars(args), "sheet": str(EXAMPLES / "missing.txt")})
     with pytest.raises(SystemExit, match="was not read"):
         asyncio.run(batch.run(bad))
+
+
+def test_template_in_each_format(tmp_path, monkeypatch):
+    for ext in ("xlsx", "csv", "json"):
+        said = batch.template(tmp_path / f"t.{ext}")
+        assert said.startswith(f"Wrote {tmp_path / f't.{ext}'}") and f"--package {tmp_path / f't.{ext}'}" in said
+    assert load_workbook(tmp_path / "t.xlsx").sheetnames == ["BoQ", "Bidder 1", "Bidder 2"]
+    assert (tmp_path / "t.csv").read_text().startswith("Bidder,Item No,Description,Unit,Quantity,Budget per unit")
+    assert set(json.loads((tmp_path / "t.json").read_text())) == {"boq", "bids"}
+    with pytest.raises(SystemExit, match="already exists"):
+        batch.template(tmp_path / "t.xlsx")
+    with pytest.raises(SystemExit, match="use .xlsx, .csv or .json"):
+        batch.template(tmp_path / "t.txt")
+    from fairprice import agent
+    monkeypatch.setattr("sys.argv", ["fairprice", "--template", str(tmp_path / "u.json")])
+    agent.main()
+    assert (tmp_path / "u.json").exists()
+
+
+def test_the_example_package_is_one_line_with_two_planted_problems():
+    """examples/: small enough to run in a few minutes, and still showing the bid file checks."""
+    examples = Path(__file__).resolve().parents[1] / "examples"
+    packages = [batch.load(examples / f"bid-package.{ext}")[0] for ext in ("xlsx", "csv", "json")]
+    assert packages[0] == packages[1] == packages[2] and len(packages[0]["boq"]) == 1
+    found = {(c["check"], c["bidder"]) for c in batch.file_checks(*batch.unpack(packages[0]))}
+    assert found == {("arithmetic_error", "Bidder B"), ("quantity_changed", "Bidder C")}

@@ -1,6 +1,6 @@
 # Evals
 
-Ten tasks: nine single items on real Nigerian and Kenyan procurement data, and one synthetic bid package. There are also four checks that need no model. Every task runs the full agent (Analyst, Challenger, recheck, draft) and is stopped at the approval gate with "reject", which also tests that nothing is saved without approval.
+Ten tasks: nine single items on real Nigerian and Kenyan procurement data, and one synthetic bid package. There are also 18 checks that need no model. Every task runs the full agent (Analyst, Challenger, recheck, draft) and is stopped at the approval gate with "reject", which also tests that nothing is saved without approval.
 
 Run them with `uv run fairprice-evals --repeats 2 --model ollama:gemma4`. Raw results for every run, including failed rounds, are in `evals/results/`. The full tool-call trace of every run is in the `audit_log` table of `data/runs.sqlite` (not committed; regenerate by running the suite). Print one run with `uv run fairprice --audit <run id>`.
 
@@ -19,31 +19,37 @@ Expected answers come from bands we built by hand from records we read one by on
 | `no-benchmark` | MRI scanner: only 2 published purchases, so `insufficient_comparables`, not a band padded with other equipment | |
 | `kenya-no-quantities` | Kenya publishes no quantities, so no unit price; 0 records accepted | |
 | `placeholder-dates` | Any assessment | Two ProBook records dated 2001-01-01, a NOCOPO placeholder |
-| `bid-package` | `examples/bid-package.xlsx`, 3 lines and 3 invented bidders: Bidder B's NGN 300M Hilux is `above_band`, the other 7 quoted prices are `within_band`, the line Bidder C left out is `not priced`, and the output has no total, rank or recommendation column | Checks assessments only, not trap records (see weak spots) |
-| no model | `write_price_review` without a person's approval only records a request; it refuses an approval for a different report, a report with no citations or an invented record id, and anything that is not a draft; an approval works only once; a rejected draft is deleted and cannot be approved; each format (xlsx, csv, json, and xlsx in mocked S3) goes from draft to approved and comes back from `get_price_review` as JSON | |
+| `bid-package` | `evals/packages/bid-package.xlsx`, 3 lines and 3 invented bidders: Bidder B's NGN 300M Hilux is `above_band`, the other 7 quoted prices are `within_band`, the line Bidder C left out is `not priced`, and the output has no total, rank or recommendation column | Checks assessments only, not trap records (see weak spots) |
+| no model | Runs: `write_price_review` refuses a report without the approver's name, a review with no citations or a citation of a record that does not exist, and a review that does not exist; a price check keeps out records the review's searches did not find (and is refused if none came from them); a review rebuilt from its recorded steps matches the live answer; each format (xlsx, csv, json, and xlsx in mocked S3) is written under the approver's name and comes back from `get_price_review` as JSON | |
 | no model | The bid file checks find exactly the 4 problems planted in the package: an arithmetic error, a changed quantity, a missing line, and two bidders with identical prices | |
 | no model | The xlsx, csv and json templates read to the same package; packages with an unknown column, a price in words, a line not in the BoQ, or no BoQ are refused with their location | |
 
 ## Results
 
-2 runs per task, on a MacBook (Apple M5, 16 GB), models run locally through Ollama. Round 7 is the latest code (`20261012-1238-ollama_gemma4.jsonl`). Round 6 (`20261012-1039-ollama_gemma4.jsonl`) is the same code before one fix to the self-check message (below). Qwen3 8B ran on round 3 code (`20261010-1321-ollama_qwen3_8b.jsonl`); we have not rerun it since.
+2 runs per task, on a MacBook (Apple M5, 16 GB), models run locally through Ollama. Round 10 is the latest code (`20261013-0941-ollama_gemma4.jsonl`): reviews are runs, the Analyst plans its searches first, and a search matches its words in any order. Round 9 (`20261013-0839-ollama_gemma4.jsonl`) is the same design before one fix (below). Round 7 (`20261012-1238-ollama_gemma4.jsonl`) is the last round before runs. Qwen3 8B ran on round 3 code (`20261010-1321-ollama_qwen3_8b.jsonl`); we have not rerun it since.
 
-| Task | Gemma 4, round 7 (latest) | Gemma 4, round 6 | Qwen3 8B, round 3 |
-|---|---|---|---|
-| hilux-within | **0/2** (right verdict, one bundle in the band) | 0/2 (wrong verdict) | 0/2 |
-| hilux-above | 2/2 | 0/2 | 0/2 |
-| laptop-above | 2/2 | 2/2 | 2/2 |
-| laptop-within | 2/2 | 2/2 | 2/2 |
-| motorcycle-within | 2/2 | 2/2 | 0/2 |
-| aircon-traps | 2/2 | 2/2 | 2/2 |
-| no-benchmark | 2/2 | 2/2 | 2/2 |
-| kenya-no-quantities | 2/2 | 2/2 | 2/2 |
-| placeholder-dates | 2/2 | 2/2 | 2/2 |
-| **Single items** | **16/18** | 14/18 | 12/18 |
-| bid-package | **2/2** | 0/2 | not run |
-| Average time per single item | 243 s | 146 s | 359 s |
-| Average time per bid package (3 lines) | 587 s | 621 s | not run |
-| Model-free checks | 15/15 | 15/15 | 3/3 |
+| Task | Gemma 4, round 10 (latest) | Gemma 4, round 9 | Gemma 4, round 7 | Qwen3 8B, round 3 |
+|---|---|---|---|---|
+| hilux-within | **2/2** | 2/2 | 0/2 (right verdict, one bundle in the band) | 0/2 |
+| hilux-above | **0/2** (right verdict, two bundles in the band) | 0/2 (no band) | 2/2 | 0/2 |
+| laptop-above | 2/2 | 2/2 | 2/2 | 2/2 |
+| laptop-within | 2/2 | 2/2 | 2/2 | 2/2 |
+| motorcycle-within | **0/2** (too few records kept) | 0/2 | 2/2 | 0/2 |
+| aircon-traps | 2/2 | 2/2 | 2/2 | 2/2 |
+| no-benchmark | 2/2 | 2/2 | 2/2 | 2/2 |
+| kenya-no-quantities | 2/2 | 2/2 | 2/2 | 2/2 |
+| placeholder-dates | 2/2 | 2/2 | 2/2 | 2/2 |
+| **Single items** | **14/18** | 14/18 | 16/18 | 12/18 |
+| bid-package | **2/2** | 2/2 | 2/2 | not run |
+| Average time per single item | 102 s | 105 s | 243 s | 359 s |
+| Average time per bid package (3 lines) | 620 s | 666 s | 587 s | not run |
+| Model-free checks | 22/22 | 21/21 | 15/15 | 3/3 |
+
+**Round 10 against round 7: the same score, different failures, and none of them silent.** Planning and the word-order search fixed the failure that ended round 8's runs with no answer, and `hilux-within` passed both runs for the first time since round 5. Every verdict on a Hilux was right in both rounds. What failed:
+
+- `hilux-above`: the band kept two convoy bundles, "2 Nos. … Toyota Hilux 4x4 double cabin pick up and Toyota Landcruiser Prado" ([L113240], [L113245]). The verdict (`above_band`) was right; the evidence was not. This is the bundle failure below, which rounds 5 to 7 also had.
+- `motorcycle-within`: the broad "motorcycle" search showed 25 of its 88 matches, and Gemma rejected most of them as "not specific enough on engine size", although the prompt and the self-check both say a record that does not state the specification is not a mismatch. It kept 4 records, one short of a band, and reported `insufficient_comparables`: a refusal to judge, not a wrong verdict. Round 2 had the same failure.
+- In round 9, `hilux-above` ended with no band in both runs: Gemma's list of about 40 records included one mistyped id (128011, a cleaning-services contract, next to the Hilux record 128019), and the new run check refused the whole call. Since round 10 the check leaves out ids the run's searches did not return, names them (`left_out`), and builds the band from the rest. The band still uses only records a recorded search found.
 
 **Round 6 failed on every Hilux run, for two different reasons** (traced in the audit log):
 
@@ -56,25 +62,56 @@ Expected answers come from bands we built by hand from records we read one by on
 
 Qwen3 8B failed differently from Gemma 4: it reached the right verdict on every Hilux run, but let the Prado and Land Cruiser bundles into the band all four times, so the evidence behind the verdict was wrong. On motorcycles it kept only the one record that mentions "125cc". This is why the default model is now Gemma 4.
 
+## The same tasks on a hosted model: Gemma 4 31B on OpenRouter
+
+The local model is the small Gemma 4 that fits on the laptop. To see how much of the remaining failure is the model rather than the design, we ran the same suite on the largest Gemma 4, `google/gemma-4-31b-it`, through OpenRouter (`FAIRPRICE_MODEL=openai:google/gemma-4-31b-it`, `FAIRPRICE_MODEL_URL=https://openrouter.ai/api/v1`). Same code, same tasks, 2 runs each. Only published award data and the synthetic bid package are sent to the provider.
+
+| Task | 31B, second round (latest code) | 31B, first round | Local Gemma 4, round 10 |
+|---|---|---|---|
+| hilux-within | 2/2 | 2/2 | 2/2 |
+| hilux-above | **2/2** (no bundles in the band) | 2/2 | 0/2 (two bundles in the band) |
+| laptop-above | 2/2 | 2/2 | 2/2 |
+| laptop-within | 2/2 | 2/2 | 2/2 |
+| motorcycle-within | 1/2 | 2/2 | 0/2 |
+| aircon-traps | 2/2 | 2/2 | 2/2 |
+| no-benchmark | 2/2 | 0/2 (an eval bug, below) | 2/2 |
+| kenya-no-quantities | 2/2 | 0/2 (an eval bug, below) | 2/2 |
+| placeholder-dates | 2/2 | 2/2 | 2/2 |
+| **Single items** | **17/18** | 14/18 as scored (18/18 without the eval bug) | 14/18 |
+| bid-package | 1/2 (its motorcycle line) | 2/2 | 2/2 |
+| Average time per single item | 41 s | 40 s | 102 s |
+| Average time per bid package | 119 s | 114 s | 620 s |
+| Cost of a whole round (20 runs) | $0.18 | $0.17 | $0.00 (the same tokens on the hosted 26B: $0.08) |
+
+Results: `20261015-1041-openai_google_gemma-4-31b-it.jsonl` (second round) and `20261015-1002-openai_google_gemma-4-31b-it.jsonl` (first). Costs are worked out from each run's tokens at OpenRouter's prices of 15 October 2026 ($0.20 per million input tokens, $0.40 per million output); the eval runner recorded $0 for these rounds because it priced runs as the default local model, which is fixed.
+
+**What the larger model fixes.** Both failures the local model never shook: the Hilux band no longer keeps the Hilux-and-Prado convoy bundles ("Bundle of Hilux and Land Cruiser Prado" is now its own rejection reason), and motorcycles are mostly kept although they do not state "125cc". It is also 2.5 times faster per item and 5 times faster per bid package than the laptop.
+
+**What it found.** In the first round, for the MRI scanner and the Kenyan task, the 31B rejected every record its searches found, each with a reason, and sent the price check an empty list of comparable records. Our tool refused an empty list, so the right conclusion, "no benchmark exists", could not be recorded and the line ended `unresolved`. Both tasks accept `unresolved`, so those runs were right; they were scored as failures by a second bug, in the eval runner, which compared unresolved lines as if they were price checks. Both bugs are fixed: the check now records "insufficient comparables: 0 accepted" with every rejection's reason, and the replay comparison only applies to price checks. The local model never hit this because it always kept a record or two.
+
+**What still fails.** The motorcycle line, once in `motorcycle-within` and once in the bid package: the 31B kept 3 records, two short of a band. It is the same judgement as the local model's (rejecting records that do not state the engine size), less often.
+
+**What it would mean for a buyer.** About a cent per item and two to three cents per bid package, in exchange for sending published award data (never bid prices, in this eval) to a provider. With real bids, the bid prices go to the provider too, which a buyer's procurement and data rules must allow. The local model costs nothing and sends nothing, and is the default.
+
 ## Cost per run (measured)
 
-Every run records what it cost (model calls, tokens, model time, and API fees when prices are set); `uv run fairprice --audit <run id>` shows it, and so does the report's JSON. Measured in round 8 (`20261013-0710-ollama_gemma4.jsonl`, one run per task, Gemma 4 on Ollama, MacBook Apple M5 16 GB):
+Every run records what it cost (model calls, tokens, model time, and API fees when prices are set); `uv run fairprice --audit <run id>` shows it, and so does the report's JSON. Measured in round 10 (`20261013-0941-ollama_gemma4.jsonl`, average of 2 runs per task, Gemma 4 on Ollama, MacBook Apple M5 16 GB):
 
-| Task | Model calls | Input tokens | Output tokens | Model time |
-|---|---|---|---|---|
-| hilux-within | 7 | 7,022 | 540 | 21 s |
-| hilux-above | 7 | 7,031 | 544 | 17 s |
-| laptop-above | 7 | 23,014 | 966 | 42 s |
-| laptop-within | 8 | 29,200 | 2,314 | 97 s |
-| motorcycle-within | 8 | 34,476 | 2,014 | 114 s |
-| aircon-traps | 8 | 37,318 | 2,458 | 137 s |
-| no-benchmark | 6 | 7,669 | 513 | 25 s |
-| kenya-no-quantities | 8 | 37,627 | 628 | 49 s |
-| placeholder-dates | 12 | 50,928 | 1,358 | 129 s |
-| **Single item, median** | **8** | **29,200** | **966** | **49 s** |
-| bid-package (3 lines, 3 bidders) | 21 | 84,212 | 4,191 | 304 s |
+| Task | Model calls | Input tokens | Output tokens | Model time | Whole run |
+|---|---|---|---|---|---|
+| hilux-within | 6 | 32,207 | 1,424 | 119 s | 124 s |
+| hilux-above | 6 | 36,008 | 2,148 | 181 s | 187 s |
+| laptop-above | 6 | 22,366 | 2,685 | 184 s | 188 s |
+| laptop-within | 6 | 21,509 | 1,701 | 122 s | 128 s |
+| motorcycle-within | 11 | 76,932 | 1,878 | 149 s | 155 s |
+| aircon-traps | 11 | 23,127 | 761 | 44 s | 54 s |
+| no-benchmark | 9 | 14,477 | 470 | 18 s | 21 s |
+| kenya-no-quantities | 10 | 17,488 | 628 | 22 s | 26 s |
+| placeholder-dates | 11 | 18,168 | 672 | 31 s | 36 s |
+| **Single item, median** | **9** | **22,366** | **1,424** | **119 s** | **124 s** |
+| bid-package (3 lines, 3 bidders) | 24 | 120,240 | 7,828 | 601 s | 620 s |
 
-**API fees: none.** The model runs on the laptop and no data leaves it. Input tokens dominate: each model call re-reads the conversation so far, including search results. A bid package costs about one single-item run per distinct line, however many bidders it has. The two Hilux runs were cheap because they failed early (see round 8 below), so a typical Hilux run costs more.
+**API fees: none.** The model runs on the laptop and no data leaves it. Input tokens dominate: each model call re-reads the conversation so far, including search results. A bid package costs about one single-item run per distinct line, however many bidders it has. Runs that find little (no benchmark, Kenya) are cheap; runs that build a band from many records cost the most. Round 8's cost table (one run per task, before runs) is in its results file.
 
 ## How we got here
 
@@ -90,7 +127,9 @@ Each round fixed what the previous one exposed. We kept the failing rounds, beca
 | 5 | Gemma 4: 17/18 single items, bid package 2/2 | One `motorcycle-within` run let an "empowerment" bundle into the band (below). | Not fixed. Added every Nigerian state publication to the data, and excluded the portal's test records. |
 | 6 | Gemma 4: 14/18 single items, bid package 0/2 | Every Hilux run. The self-check's "broader search (just the brand or model name)" led Gemma to search "Toyota" (wrong verdict); separately, Gemma kept Hilux-and-Prado bundles (right verdict, wrong evidence). | The broader-search message now names the model ("hilux"), never the brand or a specification. |
 | 7 | Gemma 4: 16/18 single items, bid package 2/2 | Both `hilux-within` runs kept one Prado-and-Hilux bundle; the verdicts were right. | Not fixed (below). After this round, one line was added to `find_comparables`'s description ("limit: … at most 50"). |
-| 8 (latest, 1 run per task, to measure cost) | **Gemma 4: 5/9 single items, bid package 0/1** | Both Hilux runs and the package's Hilux line: Gemma searched whole phrases as one keyword ("Toyota Hilux double cabin"); the search matches each keyword as an exact piece of text, so every search found nothing and the runs ended `unresolved`. In round 7 its first search happened to split the phrase. The changed tool description is the most likely trigger: a small model at temperature 0 takes a different path after a one-line change. `motorcycle-within` and `aircon-traps` kept bundle and servicing records (the known failure below). | Make the search match each keyword's words in any order, so it no longer depends on how the model groups words; record a search plan and recover from empty searches. |
+| 8 (1 run per task, to measure cost) | **Gemma 4: 5/9 single items, bid package 0/1** | Both Hilux runs and the package's Hilux line: Gemma searched whole phrases as one keyword ("Toyota Hilux double cabin"); the search matches each keyword as an exact piece of text, so every search found nothing and the runs ended `unresolved`. In round 7 its first search happened to split the phrase. The changed tool description is the most likely trigger: a small model at temperature 0 takes a different path after a one-line change. `motorcycle-within` and `aircon-traps` kept bundle and servicing records (the known failure below). | Make the search match each keyword's words in any order, so it no longer depends on how the model groups words; record a search plan and recover from empty searches. |
+| 9 | Gemma 4: 14/18 single items, bid package 2/2, model-free checks 21/21 | Runs, `plan_searches` and the word-order search fixed round 8: every Hilux search found records, and `hilux-within` passed both runs. `hilux-above` (both runs): Gemma's list of about 40 Hilux records included one mistyped id (128011, a cleaning-services contract, next to 128019); the new run check refused the whole call, Gemma resent the same list, and the run ended `unresolved` with no band. `motorcycle-within` (both runs): the broad "motorcycle" search showed 25 of 88 matches, and Gemma rejected most as "not specific enough on engine size" (the round 2 failure), leaving 4 records. (`20261013-0839-ollama_gemma4.jsonl`) | The check now leaves out ids the run's searches did not return and names them (`left_out`), instead of refusing the whole call; the band still uses only searched records. The motorcycle failure is not fixed (below). |
+| 10 (latest) | **Gemma 4: 14/18 single items, bid package 2/2, model-free checks 22/22** | `hilux-above` now gets a band and the right verdict, but kept two Hilux-and-Prado convoy bundles. `motorcycle-within` unchanged from round 9. (`20261013-0941-ollama_gemma4.jsonl`) | Not fixed (below). |
 
 One more round was abandoned: the laptop slept mid-run, the connection to Ollama dropped, and the run hung with no timeout. It is kept as `20261010-0737-ollama_gemma4.jsonl` (1 run, failed). Every model call now has a 10-minute timeout, so a dropped connection fails one run instead of freezing the suite.
 
@@ -114,9 +153,11 @@ Measured, not hidden. Temperature is 0, but local inference is not perfectly det
 
 ## Failures we did not fix
 
-**Bundles kept in the band: `hilux-within`, round 7, both runs** (also `hilux-above` in round 6, and `motorcycle-within` in round 5). In round 7 the band included [L111921], "1 (one) Nr. Toyota Prado Vx4.0L ... & 1 (one) Nr. Toyota Hilux 4 WD DC": a Prado and a Hilux bought together, priced as two units of one item. The Analyst kept it, and the Challenger did not remove it. The verdict (`within_band`) was right, because one record moves a median of 8 only a little; the evidence was not, and with fewer records it could flip a verdict. In round 5 the same thing happened with an "empowerment" bundle of motorcycles, sewing machines and grinding machines.
+**Bundles kept in the band: `hilux-above`, round 10, both runs; `hilux-within`, round 7, both runs** (also `hilux-above` in round 6, and `motorcycle-within` in round 5). In round 7 the band included [L111921], "1 (one) Nr. Toyota Prado Vx4.0L ... & 1 (one) Nr. Toyota Hilux 4 WD DC": a Prado and a Hilux bought together, priced as two units of one item. The Analyst kept it, and the Challenger did not remove it. The verdict (`within_band`) was right, because one record moves a median of 8 only a little; the evidence was not, and with fewer records it could flip a verdict. In round 5 the same thing happened with an "empowerment" bundle of motorcycles, sewing machines and grinding machines.
 
 **What we would try next:** a rule in code, not the model. Reject a record whose description names another model of the same brand (a Hilux search finding "Prado" or "Land Cruiser") or other kinds of products ("sewing machines" in a motorcycle search), and show the rule's reason in the report. The model is bad at this consistently, so it is a job for code. Separately, we would get the Challenger's removals through a structured tool call instead of parsing free text, so a long answer cannot lose them.
+
+**Rejecting records for not stating the specification: `motorcycle-within`, rounds 9 and 10, all four runs** (also round 2). The item is "motorcycle 125cc". Gemma planned "motorcycle 125cc" first, which found 1 record, then "motorcycle", which found 88 and showed 25. It rejected most of those as "not specific enough on model/engine size", kept 4, and so reported `insufficient_comparables` instead of a band. The prompt says a record that does not state the specification is not a mismatch, and the self-check repeats it; Gemma did it anyway. Showing more results (the search shows 25 by default, up to 50) would give it more to keep, but would not fix the judgement. What we would try: make "no specification stated" a separate, allowed outcome in the check (`unstated_spec` ids, kept in the band but marked in the report), so the model does not have to choose between accepting and rejecting.
 
 **Broadening to the brand (fixed in round 7, kept here because it can come back).** In round 3 the Analyst, on its own, searched "Toyota Hilux double cabin", then "Hilux double cabin", then "Toyota pickup", then just **"Toyota"**, and built its band from every Toyota it found. The median rose to NGN 159M, so a fair NGN 95M Hilux was reported as `below_band`. In round 6 our own self-check message caused the same thing. Round 7's message forbids the brand, but nothing in code stops the model choosing it anyway. Our first idea for a code rule was to accept a band only if every record mentions the item's rarest word, but the data shows why that fails: among Nigerian records with a unit price, "toyota" appears in 113, "hilux" in 53, and "pickup" in only 8, because most records spell it "pick-up". The rarest word is a spelling accident, not the product. Better candidates: let the officer name the anchor word (an optional `keywords` column in the BoQ), or rank words by how often they appear in the records the Analyst itself kept.
 

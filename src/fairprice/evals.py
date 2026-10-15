@@ -1,7 +1,7 @@
 """Run evals/cases.json against the real agent, several times each, and record every result.
 
 Usage: uv run fairprice-evals --repeats 3 [--model ollama:gemma4] [--cases hilux-above,no-benchmark]
-Every run is stopped at the approval gate with "reject", which also tests that nothing is saved.
+Every run is stopped at the person's decision with "reject", which also tests that nothing is saved.
 """
 
 import argparse
@@ -15,7 +15,6 @@ import json
 import re
 import statistics
 import time
-import uuid
 from pathlib import Path
 from unittest import mock
 
@@ -49,22 +48,27 @@ def judge(case, state):
 
 def cost(usage):
     c = usage.summary()
-    return {k: c[k] for k in ("model_calls", "input_tokens", "output_tokens", "model_seconds")}
+    return {k: c[k] for k in ("model_calls", "input_tokens", "output_tokens", "model_seconds", "api_fees", "hosted_cost")}
 
 
 async def run_package(graph, case, model):
-    """A whole bid package: per-bidder assessments from the shared bands, and nothing saved or ranked."""
-    batch_id = f"eval-{case['id']}-{uuid.uuid4().hex[:6]}"
-    usage = agent.Usage()
-    base = {"currency": "NGN", "year": case["year"], "country": "NG"}
-    agent.audit(batch_id, event="batch_started", sheet=case["package"], model=model)
+    """A whole bid package: per-bidder assessments from the shared bands, judged from the run as recorded
+    (a replay of its steps), and nothing saved or ranked."""
+    usage = agent.Usage(model)
+    base = server.review_request(case.get("currency"), case["year"], case.get("country", "NG"))
+    run_id = None
     start = time.perf_counter()
     try:  # everything, including reading the package: one bad case must not stop the suite
-        boq, bidders = batch.read_package(ROOT / case["package"])
+        package, where = batch.load(ROOT / case["package"])
+        boq, bidders = batch.unpack(package, where)
         lines = batch.package_lines(boq, bidders)
-        states = await batch.analyse(graph, lines, base, batch_id, usage=usage)
-        got = {f"{line}/{b}": c["status"] for (line, b), c in report.cells(lines, states, list(bidders)).items()}
-        data = report.build(case["package"], lines, states, list(bidders), batch.file_checks(boq, bidders), base, batch_id)
+        checks = batch.file_checks(boq, bidders)
+        run_id = db.start_run("package", case["package"], base, lines, list(bidders), checks)
+        agent.audit(run_id, event="run_started", sheet=case["package"], model=model)
+        await batch.analyse(graph, lines, base, run_id, usage=usage)
+        run, lines, states = server.review(run_id)
+        got = {f"{line}/{b}": c["status"] for (line, b), c in report.cells(lines, states, run.bidders).items()}
+        data = report.build(run.title, lines, states, run.bidders, run.checks, run.request, run_id)
         table = [{**data["prices"][0], **report.headings(data)[0][0]}]  # field names and spreadsheet headings
         failures = [f"line {k}: {got.get(k)}, expected {'/'.join(v)}" for k, v in case["expect_cells"].items()
                     if got.get(k) not in v]
@@ -74,45 +78,52 @@ async def run_package(graph, case, model):
     except Exception as e:
         result = {"assessment": "error", "n": 0, "median": None, "challenge": None,
                   "failures": [repr(e)[:300]], "passed": False}
-    return {"case": case["id"], "run_id": batch_id, "seconds": round(time.perf_counter() - start, 1), **result,
+    return {"case": case["id"], "run_id": run_id, "seconds": round(time.perf_counter() - start, 1), **result,
             **cost(usage)}
 
 
-async def run_case(graph, case, model):
+async def run_case(graph, tools, case, model):
     if "package" in case:
         return await run_package(graph, case, model)
-    run_id = agent.CURRENT_RUN = f"eval-{case['id']}-{uuid.uuid4().hex[:6]}"
-    usage = agent.Usage()
-    config = {"configurable": {"thread_id": run_id}, "callbacks": [usage]}
-    req = {"item": case["item"], "unit_price": case["unit_price"], "year": case["year"],
-           "currency": case.get("currency", "NGN"), "country": case.get("country", "NG")}
-    agent.audit(run_id, event="run_started", request=req, model=model)
+    usage, run_id = agent.Usage(model), None
     start = time.perf_counter()
-    try:
+    try:  # a crash is a failed run, not a reason to stop the suite
+        started = agent.as_json(agent.tool_text(await tools["start_review"].ainvoke(
+            {"item": case["item"], "unit_price": case["unit_price"], "year": case["year"],
+             "currency": case.get("currency", ""), "country": case.get("country", "NG")})))
+        run_id = agent.CURRENT_RUN = started["run_id"]
+        req = {"run_id": run_id, "line": "1", "item": case["item"], "unit_price": case["unit_price"],
+               "currency": started["currency"], "year": started["year"], "country": started["country"]}
+        agent.audit(run_id, event="run_started", request=req, model=model)
+        config = {"configurable": {"thread_id": run_id}, "callbacks": [usage]}
         await graph.ainvoke({"request": req}, config)
         await graph.ainvoke(Command(resume={"action": "reject"}), config)
         state = (await graph.aget_state(config)).values
         result = judge(case, state)
-    except Exception as e:  # a crash is a failed run, not a reason to stop the suite
+        final = state.get("final") or {}
+        replayed = (server.review(run_id)[2].get("1") or {}).get("final")
+        if "price_under_review" in final and replayed != final:  # a check the tools made (not an unresolved run)
+            result["failures"].append("the run's recorded steps do not replay to the same result")
+            result["passed"] = False
+    except Exception as e:
         result = {"assessment": "error", "n": 0, "median": None, "challenge": None,
                   "failures": [repr(e)[:300]], "passed": False}
     return {"case": case["id"], "run_id": run_id, "seconds": round(time.perf_counter() - start, 1), **result,
             **cost(usage)}
 
 
-def fake_report(record_ids):
-    """The smallest report that cites these record ids, for checks that need no model."""
-    meta = {"title": "check", "status": "draft", "approved_by": None, "approved_at": None, "prepared_at": None,
-            "prepared_by": "check", "run_id": "check", "currency": "NGN", "prices_in_year": 2025, "country": "NG",
-            "bid_file_checks": None}
-    prices = [{"line": "1", "item": "test item", "quantity_requested": None, "bidder": "Price under review",
-               "quoted_price": 1.0, "typical_past_price": None, "times_typical": None,
-               "result": "No comparison possible", "past_purchases_compared": len(record_ids),
-               "sources": list(range(1, len(record_ids) + 1)), "problems": []}]
-    srcs = [{"ref": n, "bought_by": "", "year": None, "what_was_bought": "", "quantity": None, "paid_per_item": None,
-             "currency": "NGN", "adjusted_price": None, "published_by": None, "ocid": "", "contract_id": "",
-             "dataset": "", "record_id": i} for n, i in enumerate(record_ids, 1)]
-    return {"report": meta, "prices": prices, "sources": srcs}
+def checked_run(record_ids=None, result=None):
+    """A review of one item whose line was searched and checked, without a model. With `result`, the check step
+    is written straight into the run (as if the database had been tampered with), skipping the tool's guards."""
+    record_ids = [KNOWN_RECORD] if record_ids is None else record_ids
+    run_id = server.start_review("test item", 1.0, "NGN", 2025, "NG")["run_id"]
+    db.add_step(run_id, "1", "search", {"keywords": ["test"], "country": "NG", "matches": len(record_ids),
+                                        "ids": record_ids})
+    if result is None:
+        server.check_price_comparability(run_id, record_ids)
+    else:
+        db.add_step(run_id, "1", "check", {"candidate_ids": record_ids, "rejected": {}, "result": result})
+    return run_id
 
 
 @contextlib.contextmanager
@@ -132,72 +143,62 @@ def sandbox(provider="file", fmt="xlsx"):
 
 
 def round_trip(provider, fmt):
-    """Draft -> approve -> list -> retrieve -> the files say who approved -> the draft files are gone."""
+    """Start -> search -> check -> write under a person's name -> list -> retrieve -> the files say who approved it."""
     from fairprice.storage import storage
 
     with sandbox(provider, fmt):
-        agent.save_draft("check", "DRAFT-test-item-check", fake_report([KNOWN_RECORD]), "")
-        draft_files = list(report.files(fake_report([KNOWN_RECORD]), "DRAFT-test-item-check", fmt))
-        saved = server.write_price_review("DRAFT-test-item-check",
-                                          db.grant("write_price_review", "DRAFT-test-item-check", "A. Officer"))
+        run_id = checked_run()
+        saved = server.write_price_review(run_id, "A. Officer")
         listed = server.get_price_review()
-        got = server.get_price_review(saved.get("saved", ""))
+        got = server.get_price_review(run_id)
         texts = []
         for name in report.files(got, saved.get("saved", ""), fmt) if "saved" in saved else []:
             content = storage().load(name)
             if fmt == "xlsx":
                 from openpyxl import load_workbook
                 ws = load_workbook(io.BytesIO(content))["Prices"]
-                content = str(ws.cell(ws.max_row, 1).value).encode()
+                content = " ".join(str(c.value) for c in ws["A"] if c.value).encode()
             texts.append(content.decode("utf-8-sig"))
-        drafts_left = []
-        for name in draft_files:
-            try:
-                storage().load(name)
-                drafts_left.append(name)
-            except Exception:
-                pass
-    passed = ([r["name"] for r in listed.get("reports", [])] == [saved.get("saved")]
-              and got.get("report", {}).get("approved_by") == "A. Officer" and texts and not drafts_left
+    passed = ([r["run_id"] for r in listed.get("reports", [])] == [run_id]
+              and got.get("report", {}).get("approved_by") == "A. Officer" and texts
               and all("A. Officer" in t for t in texts))
-    return {"case": f"report ({fmt}, {provider} storage): draft approved, listed, retrieved as json, draft removed",
-            "passed": bool(passed), "detail": {"saved": saved, "listed": listed, "drafts_left": drafts_left}}
+    return {"case": f"report ({fmt}, {provider} storage): written under the approver's name, listed, retrieved as json",
+            "passed": bool(passed), "detail": {"saved": saved, "listed": listed}}
 
 
 def deterministic_checks():
-    """Gate checks that need no model: the write tool needs a person's approval and refuses unsourced reports."""
-    approve = lambda name: db.grant("write_price_review", name, "A. Officer")
+    """Run checks that need no model: a report is built only from what its run recorded, carries the approver's
+    name, and is refused when unsourced."""
+    empty = {"assessment": "insufficient_comparables", "accepted": [], "excluded": []}
+    forged = {"assessment": "within_band", "accepted": [{"id": 999999999}], "excluded": []}
     with sandbox():
-        for name, ids in (("DRAFT-a", [KNOWN_RECORD]), ("DRAFT-b", []), ("DRAFT-c", [999999999]),
-                          ("DRAFT-d", [KNOWN_RECORD])):
-            agent.save_draft("check", name, fake_report(ids), "")
-        asked = server.write_price_review("DRAFT-a")
+        a, b, c, d = checked_run(), checked_run(result=empty), checked_run([999999999], forged), checked_run()
         checks = {
-            "write refused with an approval for a different report": server.write_price_review("DRAFT-a", approve("DRAFT-d")),
-            "write refused for a report that cites no records": server.write_price_review("DRAFT-b", approve("DRAFT-b")),
-            "write refused for a report citing a record that does not exist":
-                server.write_price_review("DRAFT-c", approve("DRAFT-c")),
-            "write refused for a name that is not a draft": server.write_price_review("../pyproject.toml", "x"),
+            "write refused without the approver's name": server.write_price_review(a, " "),
+            "write refused for a review that cites no records": server.write_price_review(b, "A. Officer"),
+            "write refused for a review citing a record that does not exist": server.write_price_review(c, "A. Officer"),
+            "write refused for a review that does not exist": server.write_price_review("../pyproject.toml", "A. Officer"),
+            "check refused when none of its records came from the review's searches":
+                server.check_price_comparability(a, [KNOWN_RECORD + 1]),
+            "search refused for a review that does not exist": server.find_comparables("nope", ["laptop"]),
         }
-        once = approve("DRAFT-d")
-        first, second = db.use_approval(once, "write_price_review", "DRAFT-d"), db.use_approval(once, "write_price_review", "DRAFT-d")
-        agent.discard_draft("check", "DRAFT-a")
-        discarded = server.write_price_review("DRAFT-a", approve("DRAFT-a"))
-    results = [{"case": "write without a person's approval only records a request", "detail": asked,
-                "passed": asked.get("status") == "needs_approval" and "fairprice --approve" in asked.get("message", "")}]
-    results += [{"case": name, "passed": "error" in out, "detail": out} for name, out in checks.items()]
-    results.append({"case": "a person's approval can be used only once", "passed": bool(first) and second is None,
+        replay = server.review(d)[2]["1"]["final"] == server.check_price_comparability(d, [KNOWN_RECORD])
+        mixed = server.check_price_comparability(d, [KNOWN_RECORD, KNOWN_RECORD + 1])
+    results = [{"case": name, "passed": "error" in out, "detail": out} for name, out in checks.items()]
+    results.append({"case": "a review rebuilt from its recorded steps matches the tool's answer", "passed": replay,
                     "detail": None})
-    results.append({"case": "a rejected draft is deleted and can no longer be approved", "passed": "error" in discarded,
-                    "detail": discarded})
+    results.append({"case": "a record the review's searches did not find is left out of the band, and named",
+                    "passed": [r["id"] for r in mixed.get("accepted", [])] == [KNOWN_RECORD]
+                    and mixed.get("left_out", {}).get("ids") == [KNOWN_RECORD + 1], "detail": mixed})
     results += [round_trip("file", fmt) for fmt in report.FORMATS] + [round_trip("s3", "xlsx")]
     packages = [batch.load(ROOT / "examples" / f"bid-package.{ext}")[0] for ext in ("xlsx", "csv", "json")]
     results.append({"case": "the xlsx, csv and json templates read to the same bid package",
                     "passed": packages[0] == packages[1] == packages[2], "detail": None})
-    bad = {"unknown column": "bidder,line,item,quantity,rate\nBoQ,1,Laptop,2,\nBidder A,1,,2,500\n",
-           "price in words": "bidder,line,item,quantity,unit_price\nBoQ,1,Laptop,2,\nBidder A,1,,2,two million\n",
-           "line not in the BoQ": "bidder,line,item,quantity,unit_price\nBoQ,1,Laptop,2,\nBidder A,9,,2,500\n",
-           "no BoQ": "bidder,line,item,quantity,unit_price\nBidder A,1,,2,500\n"}
+    head = "Bidder,Item No,Description,Quantity,Unit Price\n"
+    bad = {"unknown column": "Bidder,Item No,Description,Quantity,Price per piece\nBoQ,1,Laptop,2,\nBidder A,1,,2,500\n",
+           "price in words": head + "BoQ,1,Laptop,2,\nBidder A,1,,2,two million\n",
+           "line not in the BoQ": head + "BoQ,1,Laptop,2,\nBidder A,9,,2,500\n",
+           "no BoQ": head + "Bidder A,1,,2,500\n"}
     for name, text in bad.items():
         path = Path(tempfile.mkdtemp()) / "package.csv"
         path.write_text(text)
@@ -208,8 +209,8 @@ def deterministic_checks():
             refused = e.problems
         results.append({"case": f"a bid package with {name} is refused, with its location", "passed": bool(refused),
                         "detail": refused})
-    boq, bidders = batch.read_package(ROOT / "examples" / "bid-package.xlsx")
-    found = {(c["check"], c["bidder"], c["line"]) for c in batch.file_checks(boq, bidders)}
+    package, where = batch.load(ROOT / "evals" / "packages" / "bid-package.xlsx")  # the eval's 3-line package
+    found = {(c["check"], c["bidder"], c["line"]) for c in batch.file_checks(*batch.unpack(package, where))}
     planted = {("arithmetic_error", "Bidder B", "2"), ("quantity_changed", "Bidder C", "1"),
                ("missing_line", "Bidder C", "3"), ("identical_prices", "Bidder A, Bidder C", "1, 2")}
     results.append({"case": "bid file checks find the 4 planted problems, and only those",
@@ -224,10 +225,10 @@ async def main_async(args):
     RESULTS.mkdir(parents=True, exist_ok=True)
     out = RESULTS / f"{dt.datetime.now():%Y%m%d-%H%M}-{args.model.replace(':', '_').replace('/', '_')}.jsonl"
     results = []
-    async with agent.session(args.model) as (graph, _):
+    async with agent.session(args.model) as (graph, tools):
         for case in cases:
             for i in range(args.repeats):
-                r = await run_case(graph, case, args.model)
+                r = await run_case(graph, tools, case, args.model)
                 results.append(r)
                 with out.open("a") as f:
                     f.write(json.dumps(r) + "\n")

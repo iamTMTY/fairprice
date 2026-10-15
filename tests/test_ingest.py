@@ -17,7 +17,7 @@ def query(sql, *params):
 def test_one_file_per_country_and_a_manifest():
     assert sorted(p.name for p in ingest.RAW.glob("*.jsonl.gz")) == ["kenya.jsonl.gz", "nigeria.jsonl.gz", "rwanda.jsonl.gz"]
     manifest = json.loads(ingest.MANIFEST.read_text())
-    assert [p["publication"] for p in manifest] == [147, 64, 145]  # Kenya and Nigeria first, the empty entry skipped
+    assert [p["publication"] for p in manifest] == [64, 147, 145]  # in the order added; the empty entry skipped
     assert {p["prefix"] for p in manifest} == {"ocds-tstke1", "ocds-tstng1", "ocds-tstrw1"}
 
 
@@ -26,7 +26,7 @@ def test_each_publication_is_read_the_right_way():
     assert rows[147][:2] == ("KES", "awards")
     assert rows[64][:2] == ("NGN", "items")
     assert rows[145][:2] == ("RWF", "item_prices")
-    assert rows[147][2] == 1 and rows[64][2] == rows[147][3] + 1 and rows[145][2] == rows[64][3] + 1  # contiguous blocks
+    assert rows[64][2] == 1 and rows[147][2] == rows[64][3] + 1 and rows[145][2] == rows[147][3] + 1  # contiguous blocks
 
 
 def test_lines_carry_unit_prices_only_where_the_data_supports_them():
@@ -45,7 +45,7 @@ def test_cpi_and_exchange_rates_for_every_loaded_country():
 def test_rebuild_keeps_record_ids(capsys):
     before = query("SELECT id, ocid, line_id FROM lines ORDER BY id")
     with offline_registry():
-        ingest.main([])  # a plain rebuild from the manifest
+        ingest.main(["--rebuild"])  # from the files already downloaded
     assert query("SELECT id, ocid, line_id FROM lines ORDER BY id") == before
     assert ingest.status()["state"] == "done"
 
@@ -98,3 +98,12 @@ def test_a_failed_append_leaves_the_country_file_untouched(tmp_path, monkeypatch
             ingest.append({"publication": 145, "title": "Rwanda"}, "rwanda.jsonl.gz")
     assert target.stat().st_size == len(b"existing")
     assert not list(tmp_path.glob("*.part"))
+
+
+def test_a_country_code_is_always_needed(monkeypatch, capsys):
+    with pytest.raises(SystemExit):
+        ingest.main([])
+    assert "give a country code to load, e.g. --add NG" in capsys.readouterr().err
+    monkeypatch.setattr(ingest, "manifest", lambda: [])
+    with pytest.raises(SystemExit, match="Nothing downloaded yet"):
+        ingest.main(["--rebuild"])

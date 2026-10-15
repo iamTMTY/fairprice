@@ -5,15 +5,13 @@ import asyncio
 import json
 import uuid
 from types import SimpleNamespace
-from unittest import mock
 
 import pytest
-from langchain_core.messages import ToolMessage
-from langgraph.types import Command
+from langchain_core.messages import AIMessage, ToolMessage
 
 import conftest
 from conftest import ScriptedModel, fake_session, ids
-from fairprice import agent, report
+from fairprice import agent, report, server
 
 REQ = {"item": "Toyota Hilux double cabin pickup", "unit_price": 95e6, "currency": "NGN", "year": 2025, "country": "NG"}
 
@@ -22,15 +20,47 @@ def tool_msg(name, content):
     return ToolMessage(content=json.dumps(content), name=name, tool_call_id=uuid.uuid4().hex)
 
 
+def plan(*searches):
+    """The Analyst's plan_searches call and its answer."""
+    call = AIMessage("", tool_calls=[{"name": "plan_searches", "args": {"searches": list(searches)}, "id": uuid.uuid4().hex}])
+    return [call, tool_msg("plan_searches", {"recorded": True})]
+
+
+def searched(keywords, matches):
+    call = AIMessage("", tool_calls=[{"name": "find_comparables", "args": {"keywords": keywords}, "id": uuid.uuid4().hex}])
+    return [call, tool_msg("find_comparables", {"total_matches": matches})]
+
+
 def test_self_check_sends_the_analyst_back_when_unfinished():
-    assert "never checked" in agent.unfinished([])
-    assert "searched after your last price check" in agent.unfinished([tool_msg("find_comparables", {})])
-    thin = [tool_msg("find_comparables", {}), tool_msg("check_price_comparability", {"band": {"n": 6}, "assessment": "within_band"})]
-    assert "one broader search" in agent.unfinished(thin)
-    few = [tool_msg("find_comparables", {}), tool_msg("check_price_comparability", {"band": None, "assessment": "insufficient_comparables"})]
-    assert "never a specification" in agent.unfinished(few)
-    done = [tool_msg("find_comparables", {})] * 2 + [tool_msg("check_price_comparability", {"band": {"n": 12}, "assessment": "within_band"})]
-    assert agent.unfinished(done) is None
+    assert "plan_searches" in agent.unfinished([])  # planning comes first
+    assert "never checked" in agent.unfinished(plan(["hilux"]))
+    assert "searched after your last price check" in agent.unfinished(plan(["hilux"]) + searched(["hilux"], 3))
+    thin = searched(["hilux"], 6) + [tool_msg("check_price_comparability", {"band": {"n": 6}, "assessment": "within_band"})]
+    assert "one broader search" in agent.unfinished(plan(["hilux"]) + thin)
+    assert "next search in your plan (['pickup'])" in agent.unfinished(plan(["hilux"], ["pickup"]) + thin)
+    few = searched(["hilux"], 2) + [tool_msg("check_price_comparability", {"band": None, "assessment": "insufficient_comparables"})]
+    assert "never a specification" in agent.unfinished(plan(["hilux"]) + few)
+    assert "Run the next search in your plan: ['pickup']" in agent.unfinished(plan(["hilux"], ["pickup"]) + few)
+    nothing = plan(["hilux double cabin"], ["cabin", "double hilux"], ["pickup"]) + searched(["double cabin hilux"], 0)
+    assert "Every search so far found nothing. Run the next search in your plan: ['pickup']" in agent.unfinished(nothing)
+    assert "single word" in agent.unfinished(plan(["hilux"]) + searched(["hilux"], 0))
+    done = searched(["hilux"], 12) * 2 + [tool_msg("check_price_comparability", {"band": {"n": 12}, "assessment": "within_band"})]
+    assert agent.unfinished(plan(["hilux"]) + done) is None
+    assert agent.planned([]) == [] and agent.next_planned(plan(["a b"]) + searched(["b", "a"], 1)) is None
+
+
+def test_bound_tools_hide_the_run_from_the_model():
+    async def go():
+        async with fake_session(ScriptedModel()) as (_, tools):
+            run = server.start_review("Laptop computer", 2e6, year=2025)["run_id"]
+            search = agent.bound(tools["find_comparables"], run, "1")
+            assert "run_id" not in search.args and "line" not in search.args and "keywords" in search.args
+            assert "year_from" not in search.args and "year_to" not in search.args  # every year is comparable
+            narrowed = json.loads(await search.ainvoke({"keywords": ["laptop"], "year_from": 2026, "year_to": 2026}))
+            assert narrowed["total_matches"] >= 2  # a year limit the model sends anyway is dropped
+            return json.loads(await search.ainvoke({"keywords": ["laptop"]})), run
+    found, run = asyncio.run(go())
+    assert found["total_matches"] >= 2 and server.review(run)[0].id == run
 
 
 def test_tool_output_helpers():
@@ -39,9 +69,17 @@ def test_tool_output_helpers():
     assert agent.as_json("not json") == {"error": "not json"}
 
 
-async def run_graph(model, request=REQ, thread=None):
+def started(request=REQ):
+    """A review started the way the CLI starts one: the request carries its run_id and line."""
+    run = server.start_review(request["item"], request["unit_price"], request["currency"], request["year"],
+                              request["country"])["run_id"]
+    return {**request, "run_id": run, "line": "1"}
+
+
+async def run_graph(model, request=REQ):
+    request = started(request)
     async with fake_session(model) as (graph, tools):
-        config = {"configurable": {"thread_id": thread or uuid.uuid4().hex}}
+        config = {"configurable": {"thread_id": request["run_id"]}}
         await graph.ainvoke({"request": request}, config)
         return graph, config, (await graph.aget_state(config)).values
 
@@ -52,7 +90,10 @@ def test_graph_runs_to_the_approval_gate_and_stops(model):
     assert state["challenge"]["verdict"] == "DISPUTED" and "Price under review" in state["report"]
     bundle = ids("SELECT id FROM lines WHERE description LIKE '%Prado%'")[0]
     assert str(bundle) in state["rejected"]  # the Analyst's rejection is kept through the merge
-    assert len(state["searches"]) == 2  # the self-check asked for a broader search
+    assert len(state["searches"]) == 2  # the self-check asked for the next planned search
+    recorded = server.review(state["request"]["run_id"])[2]["1"]
+    assert recorded["final"] == state["final"] and recorded["plan"]["searches"] == [["hilux"], ["pickup"]]
+    assert recorded["challenge"]["verdict"] == "DISPUTED"  # the Challenger's verdict is a recorded step too
 
 
 def test_challenger_removals_are_applied_or_shown_as_objections():
@@ -98,17 +139,16 @@ def test_cli_run_reject_revise_and_approve(session, answers, capsys):
     args = argparse.Namespace(resume=None, **REQ)
     asyncio.run(agent.run(args))
     out = capsys.readouterr().out
-    assert "Draft report (DRAFT-toyota-hilux-double-cabin-pickup-" in out and '"saved"' in out
+    assert report.NOTICE in out and '"approved_by": "Ada Obi"' in out and "toyota-hilux-double-cabin-pickup-" in out
     answers(["reject"])
     asyncio.run(agent.run(args))
-    assert "Not saved: the reviewer rejected the draft." in capsys.readouterr().out
+    assert "Not saved: the reviewer rejected it." in capsys.readouterr().out
 
 
 def test_cli_resume_a_paused_run(session, answers, capsys):
-    thread = uuid.uuid4().hex[:12]
-    asyncio.run(run_graph(session, thread=thread))  # paused at the gate, in the shared checkpointer
+    _, config, _ = asyncio.run(run_graph(session))  # paused at the gate, in the shared checkpointer
     answers(["reject"])
-    asyncio.run(agent.run(argparse.Namespace(resume=thread, **REQ)))
+    asyncio.run(agent.run(argparse.Namespace(resume=config["configurable"]["thread_id"], **REQ)))
     assert "Not saved" in capsys.readouterr().out
 
 
@@ -146,7 +186,9 @@ def test_audit_log_and_its_viewer(capsys):
 
 
 def test_audit_interceptor_logs_and_reraises(capsys):
-    request = SimpleNamespace(server_name="fairprice", name="find_comparables", args={"keywords": ["x"]})
+    """The borrowed server's calls are logged by the client; our own server logs its calls itself."""
+    ours = SimpleNamespace(server_name="fairprice", name="find_comparables", args={"keywords": ["x"]})
+    request = SimpleNamespace(server_name="duckdb", name="execute_query", args={"sql": "SELECT 1"})
 
     async def ok(req):
         return SimpleNamespace(content=[{"text": "{}"}])
@@ -157,8 +199,10 @@ def test_audit_interceptor_logs_and_reraises(capsys):
     asyncio.run(agent.audit_interceptor(request, ok))
     with pytest.raises(RuntimeError):
         asyncio.run(agent.audit_interceptor(request, boom))
+    asyncio.run(agent.audit_interceptor(ours, ok))
     agent.show_audit("interceptor")
-    assert "tool failed" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "tool failed" in out and "2 entries" in out and "fairprice.find_comparables {" not in out
 
 
 def test_borrowed_server_offline_once_cached(monkeypatch):
@@ -166,7 +210,9 @@ def test_borrowed_server_offline_once_cached(monkeypatch):
     assert agent.borrowed_args()[0] == "--offline"
     monkeypatch.setattr(agent.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=1))
     assert agent.borrowed_args()[0] == agent.BORROWED
-    assert set(agent.servers()) == {"fairprice", "duckdb"}
+    found = agent.servers()
+    assert set(found) == {"fairprice", "duckdb"}
+    assert found["duckdb"]["args"][2:4] == [str(agent.BORROWED_LOG), "uvx"]  # its log lines go to a file
 
 
 def test_main_parses_the_command_line(monkeypatch, capsys):
@@ -195,14 +241,11 @@ def test_session_starts_both_mcp_servers_and_builds_the_database_when_missing(mo
     asyncio.run(agent.run(argparse.Namespace(resume=None, **REQ)))
     out = capsys.readouterr().out
     assert "-> fairprice.find_comparables" in out and "-> duckdb.execute_query" in out and '"saved"' in out
-    assert "Cost of this run: " in out and "API fees USD 0.00 (local model)" in out
-    built = []
-    monkeypatch.setattr(agent, "DB", str(tmp_path / "missing.duckdb"))
-    monkeypatch.setattr(agent.ingest, "main", lambda argv: built.append(argv))
-    monkeypatch.setattr(agent, "MultiServerMCPClient", mock.Mock(side_effect=RuntimeError("stop here")))
-    with pytest.raises(RuntimeError):
+    assert "Cost of this run: " in out and "API fees $0.00 (local model)($" in out
+    assert "Country: Nigeria (NG) · prices in NGN" in out
+    monkeypatch.setattr(agent, "DB", str(tmp_path / "missing.duckdb"))  # nothing loaded: say how, never download
+    with pytest.raises(SystemExit, match="fairprice-ingest --add NG"):
         asyncio.run(agent.session().__aenter__())
-    assert built == [[]]
 
 
 def test_show_draft_summary_for_a_single_item():
@@ -212,53 +255,12 @@ def test_show_draft_summary_for_a_single_item():
     assert conftest.SAVER is not None
 
 
-def test_a_person_decides_requests_from_ai_apps(answers, capsys, monkeypatch):
-    """`fairprice --approve`: list requests, approve a report as a named person, reject an add_country request."""
-    from fairprice import db, server
-    state = asyncio.run(run_graph(ScriptedModel(keywords={REQ["item"]: ["hilux"]})))[2]
-    agent.save_draft("ap", "DRAFT-from-an-app-ap", report.build("x", *report.single(state), None, REQ, "ap"), "")
-    request = server.write_price_review("DRAFT-from-an-app-ap")["request"]
-    agent.approve_request("")
-    assert request in capsys.readouterr().out
-    answers(["approve", "Ada Obi"])
-    agent.approve_request(request)
-    out = capsys.readouterr().out
-    assert "asks to approve the price review DRAFT-from-an-app-ap" in out and '"approved_by": "Ada Obi"' in out
-    assert server.get_price_review(json.loads(out[out.index("{"):])["saved"])["report"]["approved_by"] == "Ada Obi"
-    country = db.request_approval("add_country", "RW")
-    answers(["reject"])
-    agent.approve_request(country)
-    assert "Rejected; nothing was changed." in capsys.readouterr().out
-    with pytest.raises(SystemExit, match="No pending request"):
-        agent.approve_request(country)
-    gone = db.request_approval("write_price_review", "DRAFT-deleted")
-    with pytest.raises(SystemExit, match="no longer exists"):
-        agent.approve_request(gone)
-    country = db.request_approval("add_country", "RW")
-    answers(["approve", "Ada Obi"])
-    with mock.patch.object(server, "add_country", return_value={"started": "RW"}) as add:
-        agent.approve_request(country)
-    assert add.call_args.kwargs == {"approval": country} and "add country RW" in capsys.readouterr().out
-    db.decide(gone, False)  # the last pending request, settled
-    agent.approve_request("")
-    assert "No requests waiting for approval." in capsys.readouterr().out
-
-
-def test_main_routes_approve(monkeypatch):
-    seen = []
-    monkeypatch.setattr(agent, "approve_request", lambda rid: seen.append(rid))
-    for argv, expected in ((["fairprice", "--approve"], ""), (["fairprice", "--approve", "abc"], "abc")):
-        monkeypatch.setattr("sys.argv", argv)
-        agent.main()
-        assert seen[-1] == expected
-
-
 def test_ollama_url_and_model_checks(monkeypatch):
     monkeypatch.setenv("OLLAMA_HOST", "gpu-server:11434")
     assert agent.ollama_url() == "http://gpu-server:11434"
     monkeypatch.setenv("OLLAMA_HOST", "https://ollama.example.org/")
     assert agent.ollama_url() == "https://ollama.example.org"
-    assert agent.check_model("openai:gpt-x") == []  # other providers report their own errors
+    assert agent.check_model("anthropic:x") == []  # other providers report their own errors
 
     class Reply:
         def __init__(self, body):
@@ -298,7 +300,7 @@ def test_check_setup_reports_each_part(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(agent, "engine", lambda: (_ for _ in ()).throw(RuntimeError("no database")))
     assert agent.check_setup() == 3
     out = capsys.readouterr().out
-    assert "✗ Model" in out and "• Procurement data: not built yet" in out and "downloads on the first run" in out
+    assert "✗ Model" in out and "• Procurement data: none loaded yet" in out and "fairprice-ingest --add NG" in out
     assert "uv sync --extra s3" in out and "Check FAIRPRICE_SQL_URL" in out and "3 problem(s)" in out
     monkeypatch.setattr("sys.argv", ["fairprice", "--check"])
     with pytest.raises(SystemExit) as code:
@@ -315,7 +317,139 @@ def test_usage_counts_calls_tokens_time_and_fees(monkeypatch):
     usage.on_llm_end(SimpleNamespace(generations=[[SimpleNamespace(message=None)]]), run_id="never-started")
     c = usage.summary()
     assert (c["model_calls"], c["input_tokens"], c["output_tokens"]) == (3, 3000, 400)
-    monkeypatch.setenv("FAIRPRICE_PRICE_PER_MILLION_INPUT_TOKENS", "2")
+    # a local model: no fees, and what the same tokens cost on the closest hosted model (the smallest Gemma 4)
+    assert (c["local_model"], c["api_fees"], c["priced_as"].split(" ")[0]) == (True, 0.0, "google/gemma-4-26b-a4b-it")
+    assert usage.line().endswith("API fees $0.00 (local model)($0.00039 saved)")
+    monkeypatch.setenv("FAIRPRICE_PRICE_PER_MILLION_INPUT_TOKENS", "2")  # a negotiated price wins
     monkeypatch.setenv("FAIRPRICE_PRICE_PER_MILLION_OUTPUT_TOKENS", "10")
-    assert usage.summary()["api_fees"] == 0.01
-    assert "3 model calls, 3,000 input and 400 output tokens" in usage.line() and "USD 0.01." in usage.line()
+    assert usage.line().endswith("($0.01 saved)") and usage.summary()["priced_as"] == "your price"
+    monkeypatch.delenv("FAIRPRICE_PRICE_PER_MILLION_INPUT_TOKENS")
+    monkeypatch.delenv("FAIRPRICE_PRICE_PER_MILLION_OUTPUT_TOKENS")
+    usage.model = "openai:gpt-4o-mini"  # an API model: the fee itself
+    assert usage.line().endswith("API fees $0.00069") and usage.summary()["api_fees"] == 0.00069
+    usage.model = "anthropic:unknown"
+    assert usage.line().endswith("API fees not calculated (no price found for this model)")
+    assert agent.Usage("openai:gpt-4o-mini").summary()["model"] == "openai:gpt-4o-mini"  # priced as the model that ran
+
+
+class Reply:
+    """A minimal HTTP response for urllib.request.urlopen."""
+
+    def __init__(self, body):
+        self.body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read(self, *a):
+        return self.body
+
+
+def test_openai_compatible_route_settings(monkeypatch):
+    monkeypatch.setenv("FAIRPRICE_MODEL_URL", "http://localhost:1234/v1/")
+    settings = agent.model_settings("openai:gemma-4")
+    assert settings["base_url"] == "http://localhost:1234/v1" and settings["max_tokens"] == 4096
+    assert settings["timeout"] == 600 and settings["api_key"] == "not-needed" and settings["temperature"] == 0
+    monkeypatch.setenv("FAIRPRICE_MODEL_API_KEY", "secret")
+    assert agent.model_settings("openai:gemma-4")["api_key"] == "secret"
+    assert agent.model_settings("anthropic:x") == {"temperature": 0}
+
+
+def test_openai_compatible_server_checks(monkeypatch):
+    monkeypatch.delenv("FAIRPRICE_MODEL_URL", raising=False)
+    assert "needs FAIRPRICE_MODEL_URL" in agent.check_model("openai:gemma-4")[0]
+    monkeypatch.setenv("FAIRPRICE_MODEL_URL", "http://localhost:1234/v1")
+    real_find = agent.importlib.util.find_spec
+    monkeypatch.setattr(agent.importlib.util, "find_spec", lambda name: None)
+    assert "uv sync --extra openai-compatible" in agent.check_model("openai:gemma-4")[0]
+    monkeypatch.setattr(agent.importlib.util, "find_spec", real_find)
+
+    def refused(req, timeout):
+        raise OSError("connection refused")
+    monkeypatch.setattr(agent.urllib.request, "urlopen", refused)
+    assert "No OpenAI-compatible server at http://localhost:1234/v1" in agent.check_model("openai:gemma-4")[0]
+    seen = []
+
+    def models(req, timeout):
+        seen.append(req.headers.get("Authorization"))
+        return Reply(b'{"data": [{"id": "gemma-4"}, {"id": "qwen3"}]}')
+    monkeypatch.setattr(agent.urllib.request, "urlopen", models)
+    monkeypatch.setenv("FAIRPRICE_MODEL_API_KEY", "k")
+    assert "It has: gemma-4, qwen3" in agent.check_model("openai:llama")[0] and seen[-1] == "Bearer k"
+    monkeypatch.setattr(agent, "calls_tools", lambda model: "it answered in text instead of calling a tool")
+    problem = agent.check_model("openai:gemma-4")[0]
+    assert "answered in text" in problem and "--enable-auto-tool-choice" in problem and "--jinja" in problem
+    monkeypatch.setattr(agent, "calls_tools", lambda model: "")
+    assert agent.check_model("openai:gemma-4") == []
+
+
+def test_tool_calling_probe():
+    class Model:
+        def __init__(self, reply):
+            self.reply = reply
+
+        def bind_tools(self, tools):
+            assert tools[0]["function"]["name"] == "ping"
+            return self
+
+        def invoke(self, prompt):
+            if isinstance(self.reply, Exception):
+                raise self.reply
+            return self.reply
+    assert agent.calls_tools(Model(SimpleNamespace(tool_calls=[{"name": "ping"}]))) == ""
+    assert agent.calls_tools(Model(SimpleNamespace(tool_calls=[]))) == "it answered in text instead of calling a tool"
+    assert "the test request failed" in agent.calls_tools(Model(RuntimeError("500")))
+
+
+def test_check_shows_where_the_model_runs(monkeypatch, capsys):
+    monkeypatch.setattr(agent, "check_model", lambda name: [])
+    monkeypatch.setattr(agent, "MODEL", "openai:gemma-4")
+    monkeypatch.delenv("FAIRPRICE_MODEL_URL", raising=False)
+    agent.check_setup()
+    assert "Model openai:gemma-4 at (FAIRPRICE_MODEL_URL not set)" in capsys.readouterr().out
+    monkeypatch.setattr(agent, "MODEL", "anthropic:x")
+    agent.check_setup()
+    assert "✓ Model anthropic:x\n" in capsys.readouterr().out
+
+
+def test_context_window_probe(monkeypatch, capsys):
+    class Model:
+        def __init__(self, reads):
+            self.reads = reads
+
+        def invoke(self, prompt):
+            if isinstance(self.reads, Exception):
+                raise self.reads
+            return SimpleNamespace(usage_metadata={"input_tokens": self.reads})
+    assert agent.context_problem(Model(7005)) == ""
+    assert agent.context_problem(Model(2051)) == "it read only 2,051 of about 7,000 tokens"
+    assert "the long test request failed" in agent.context_problem(Model(RuntimeError("500")))
+    monkeypatch.setattr(agent, "MODEL", "openai:gemma-4")
+    monkeypatch.setenv("FAIRPRICE_MODEL_URL", "http://localhost:1234/v1")
+    monkeypatch.setattr(agent, "check_model", lambda name: [])
+    monkeypatch.setattr(agent, "init_chat_model", lambda name, **kw: Model(2051))
+    assert agent.check_setup() >= 1
+    assert "The server cuts long conversations: it read only 2,051" in capsys.readouterr().out
+
+
+def test_one_country_per_run(monkeypatch, answers):
+    loaded = [("NG", "Nigeria"), ("KE", "Kenya")]
+    assert agent.pick_country("ke", loaded) == "KE"
+    with pytest.raises(SystemExit, match="RW is not loaded .*fairprice-ingest --add RW"):
+        agent.pick_country("rw", loaded)
+    with pytest.raises(SystemExit, match="fairprice-ingest --add NG"):
+        agent.pick_country("", [])
+    assert agent.pick_country("", [("KE", "Kenya")]) == "KE"  # the only one loaded: no question
+    offered = []
+    monkeypatch.setattr(agent, "choose", lambda prompt, options: offered.append(options) or options[0][0])
+    monkeypatch.setenv("FAIRPRICE_COUNTRY", "KE")
+    assert agent.pick_country("", loaded) == "KE" and offered[-1] == [("KE", "Kenya"), ("NG", "Nigeria")]
+    assert agent.country_line("NG", "NGN", loaded) == "Country: Nigeria (NG) · prices in NGN"
+
+
+def test_choose_accepts_any_case(answers):
+    answers(["ng"])
+    assert agent.choose("Country", [("NG", "Nigeria"), ("KE", "Kenya")]) == "NG"

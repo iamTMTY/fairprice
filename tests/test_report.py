@@ -3,40 +3,46 @@
 import csv
 import io
 import json
-from unittest import mock
+from pathlib import Path
 
 import pytest
 from openpyxl import load_workbook
 
 from conftest import ids
-from fairprice import agent, db, report, server
+from fairprice import db, report, server
 from fairprice.storage import storage
 
 HILUX = "SELECT id FROM lines WHERE description LIKE 'Supply of Toyota Hilux double cabin pickup unit%' ORDER BY id"
 BASE = {"currency": "NGN", "year": 2025, "country": "NG"}
 
 
-def state(item, price, candidates, challenge=None, searches=None, **extra):
-    req = {**BASE, "item": item, "unit_price": price}
-    return {"request": req, "final": server.check_price_comparability(price, "NGN", 2025, candidates, **extra),
-            "challenge": challenge or {"verdict": "STANDS", "reason": "fine", "remove": {}},
-            "searches": searches or [{"keywords": ["hilux"], "country": "NG", "matches": 11}]}
+def checked(run, line, candidates, rejected=None):
+    """A line searched and checked through the run's own tools (the search step stands in for find_comparables)."""
+    db.add_step(run, line, "search", {"keywords": ["hilux"], "country": "NG", "matches": 11, "ids": candidates})
+    return server.check_price_comparability(run, candidates, rejected, line)
+
+
+def package_run(title="pkg", budget=None):
+    """Two lines, three bidders: one line with a band, one with too few records, and one bidder missing a line."""
+    lines = [{"line": "1", "item": "Toyota Hilux double cabin pickup", "quantity": 2,
+              "prices": {"A": 95e6, "B": 300e6, "C": 40e6}, **({"budget": budget} if budget else {})},
+             {"line": "2", "item": "Laptop computer", "quantity": 10, "prices": {"A": 2e6, "B": 2.1e6}}]
+    checks = [{"check": "arithmetic_error", "bidder": "B", "line": "1", "where": "sheet “B”, row 2",
+               "data": {"quantity": 2, "unit_price": 300e6, "total": 700e6}},
+              {"check": "missing_line", "bidder": "C", "line": "2", "where": None, "data": {"item": "Laptop computer"}}]
+    run = db.start_run("package", title, BASE, lines, ["A", "B", "C"], checks)
+    bundle = ids("SELECT id FROM lines WHERE description LIKE '%Prado%'")
+    checked(run, "1", ids(HILUX) + bundle, {str(bundle[0]): "Challenger: bundle"})
+    server.challenge_review(run, "STANDS", "fine")
+    checked(run, "2", ids("SELECT id FROM lines WHERE description LIKE 'Laptop computer%'"))
+    return run
 
 
 @pytest.fixture
 def package():
-    """Two lines, three bidders: one line with a band, one with too few records, and one bidder missing a line."""
-    lines = [{"line": "1", "item": "Toyota Hilux double cabin pickup", "quantity": 2,
-              "prices": {"A": 95e6, "B": 300e6, "C": 40e6}},
-             {"line": "2", "item": "Laptop computer", "quantity": 10, "prices": {"A": 2e6, "B": 2.1e6}}]
-    bundle = ids("SELECT id FROM lines WHERE description LIKE '%Prado%'")
-    states = {"1": state("Toyota Hilux double cabin pickup", 95e6, ids(HILUX) + bundle,
-                         rejected={str(bundle[0]): "Challenger: bundle"}),
-              "2": state("Laptop computer", 2e6, ids("SELECT id FROM lines WHERE description LIKE 'Laptop computer%'"))}
-    checks = [{"check": "arithmetic_error", "bidder": "B", "line": "1", "where": "sheet “B”, row 2",
-               "data": {"quantity": 2, "unit_price": 300e6, "total": 700e6}},
-              {"check": "missing_line", "bidder": "C", "line": "2", "where": None, "data": {"item": "Laptop computer"}}]
-    return lines, states, ["A", "B", "C"], checks
+    run = package_run()
+    record, lines, states = server.review(run)
+    return lines, states, record.bidders, record.checks
 
 
 def test_money_and_ranges():
@@ -44,6 +50,24 @@ def test_money_and_ranges():
     assert [report.money(v, "NGN", True) for v in (1.25e6, 300e6, 2e9, 950)] == ["₦1.25M", "₦300M", "₦2B", "₦950"]
     assert report.money(5, "USD") == "USD 5" and report.money(None, "NGN") == ""
     assert report.ranges([5, 1, 2, 3]) == "1–3, 5" and report.ranges([]) == ""
+
+
+def test_a_source_with_no_buyer_and_an_extreme_value_in_plain_words():
+    chairs = ids("SELECT id FROM lines WHERE description LIKE 'Office chair ergonomic%' ORDER BY id")
+    run = db.start_run("item", "chairs", BASE, [{"line": "1", "item": "Office chair", "quantity": None,
+                                                 "prices": {"Price under review": 50e3}}], ["Price under review"])
+    checked(run, "1", chairs)
+    record, lines, states = server.review(run)
+    data = report.build("chairs", lines, states, record.bidders, None, BASE, run)
+    assert "(buyer not published)" in {s["bought_by"] for s in data["sources"]}
+    used = {s["what_was_bought"]: s["used"] for s in data["sources"]}
+    assert used["Office chair ergonomic 1"] == "Yes"
+    assert used["Office chair ergonomic deluxe"].startswith("No: an extreme value: ")
+    assert used["Office chair ergonomic damaged"] == "No: the published value is zero or negative, an entry error"
+    assert report.headings(data)[1][0]["Used in the comparison"] in ("Yes", used[data["sources"][0]["what_was_bought"]])
+    assert report.plain_reason("extreme_value:99") == ("an extreme value: 99× the median of the other comparable records "
+                                                        "(a typing error, or a total entered as a price per item)")
+    assert report.plain_reason("value_zero_or_negative") == "the published value is zero or negative, an entry error"
 
 
 def test_plain_reasons():
@@ -69,7 +93,8 @@ def test_check_sentences():
     assert "does not add up" in report.check_text({**where, "check": "arithmetic_error",
                                                    "data": {"quantity": 2, "unit_price": 5, "total": 11}}, "NGN")
     assert "asks for 2" in report.check_text({**where, "check": "quantity_changed", "data": {"quoted": 1, "requested": 2}}, "NGN")
-    assert report.check_text({**where, "check": "missing_line", "data": {"item": "Laptop"}}, "NGN") == "B did not price line 2 (Laptop)."
+    assert report.check_text({**where, "check": "missing_line", "data": {"item": "Laptop"}}, "NGN") == \
+        "B did not price line 2 (Laptop)."  # facts only: no country's law is quoted
     assert "A and C quoted exactly the same" in report.check_text(
         {"check": "identical_prices", "bidder": "A, C", "line": "1, 2", "where": None, "data": {"same": 2, "shared": 2}}, "NGN")
     assert report.check_text({**where, "check": "something_new", "data": {}}, "NGN") == "B, line 2 (row 3): something_new."
@@ -88,8 +113,9 @@ def test_report_data_cites_its_records_and_never_ranks(package):
     assert data["report"]["status"] == "draft" and data["report"]["prepared_by"] == "FairPrice (ollama:gemma4)"
     assert [p["bidder"] for p in data["prices"][:3]] == bidders  # the file's order, not ranked
     assert data["prices"][0]["sources"] and data["prices"][2]["result"] == "Well below past prices"
-    assert len(report.cited(data)) == len(data["sources"]) >= 8
+    assert len({s["record_id"] for s in data["sources"]}) == len(data["sources"]) >= 8
     assert data["report"]["bid_file_checks"][1] == "C did not price line 2 (Laptop computer)."
+    assert "budget_per_item" not in data["prices"][0]  # no budget in this BoQ, so no budget columns
     assert not any("rank" in k or "total" in k for k in data["prices"][0])
     single = report.build("x", *report.single(states["1"]), None, states["1"]["request"], "run2")
     assert single["report"]["bid_file_checks"] is None and single["prices"][0]["bidder"] == "Price under review"
@@ -113,7 +139,8 @@ def test_three_file_formats(package):
     wb = load_workbook(io.BytesIO(xlsx["R.xlsx"]))
     assert wb.sheetnames == ["Prices", "Sources"] and wb["Prices"].oddHeader.center.text == report.DRAFT_STATUS
     assert wb["Prices"]["H3"].fill.fgColor.rgb.endswith("F8D7D7")  # Bidder B, well above: red
-    assert wb["Prices"].cell(wb["Prices"].max_row, 1).value == report.DRAFT_STATUS
+    assert wb["Prices"].cell(wb["Prices"].max_row - 1, 1).value == report.DRAFT_STATUS
+    assert wb["Prices"].cell(wb["Prices"].max_row, 1).value == report.NOTICE and data["report"]["notice"] == report.NOTICE
     out = report.files(data, "R", "csv")
     assert set(out) == {"R-prices.csv", "R-sources.csv"} and out["R-prices.csv"].startswith(b"\xef\xbb\xbf")
     rows = list(csv.DictReader(io.StringIO(out["R-prices.csv"].decode("utf-8-sig"))))
@@ -123,55 +150,38 @@ def test_three_file_formats(package):
     assert report.files(empty, "E", "csv")["E-sources.csv"].decode("utf-8-sig").startswith("Status")
 
 
-def test_draft_approve_retrieve_and_reject(package, monkeypatch):
-    lines, states, bidders, checks = package
+def test_write_retrieve_in_each_format(monkeypatch):
     for fmt in report.FORMATS:
         monkeypatch.setenv("FAIRPRICE_REPORT_FORMAT", fmt)
-        name = report.draft_name("Bid Package!", f"r{fmt}")
-        assert name == f"DRAFT-bid-package-r{fmt}"
-        agent.save_draft(f"r{fmt}", name, report.build("pkg", lines, states, bidders, checks, BASE, f"r{fmt}"), "summary")
-        assert server.write_price_review(name)["status"] == "needs_approval"  # no person, no approval
-        saved = server.write_price_review(name, db.grant("write_price_review", name, "Ada Obi"))
-        assert saved["saved"].endswith(f"bid-package-r{fmt}") and saved["sources"] >= 8
-        got = server.get_price_review(saved["saved"])
+        run = package_run("Bid Package!")
+        saved = server.write_price_review(run, "Ada Obi")  # the person who approved it, by name
+        assert saved["saved"].endswith(f"bid-package-{run}") and saved["approved_by"] == "Ada Obi"
+        assert saved["past_purchases_compared"] >= 7 and saved["left_out_with_reasons"] >= 1
+        got = server.get_price_review(run)
         assert got["report"]["approved_by"] == "Ada Obi" and got["files"]
-        assert any(r["name"] == saved["saved"] for r in server.get_price_review()["reports"])
-        with pytest.raises(Exception):
-            storage().load(f"{name}.xlsx" if fmt == "xlsx" else f"{name}.json" if fmt == "json" else f"{name}-prices.csv")
-    agent.save_draft("rj", "DRAFT-rejected-rj", report.build("pkg", lines, states, bidders, checks, BASE, "rj"), "")
-    agent.discard_draft("rj", "DRAFT-rejected-rj")
-    assert "not a draft" in server.write_price_review("DRAFT-rejected-rj", "x")["error"]
+        assert got["lines"][0]["second_check"]["verdict"] == "STANDS"
+        assert any(r["run_id"] == run for r in server.get_price_review()["reports"])
+        assert storage().load(Path(got["files"][0]).name)
     assert "No approved report" in server.get_price_review("nothing")["error"]
+    assert "No review" in server.write_price_review("nothing", "Ada")["error"]
 
 
-def test_approval_refusals(package):
-    lines, states, bidders, checks = package
-    data = report.build("pkg", lines, states, bidders, checks, BASE, "rf")
-    approve = lambda name: db.grant("write_price_review", name, "Ada")
-    agent.save_draft("rf", "DRAFT-refusals-rf", data, "")
-    assert "not an unused human approval" in server.write_price_review("DRAFT-refusals-rf", "made-up")["error"]
-    other = approve("DRAFT-something-else")
-    assert "not an unused human approval" in server.write_price_review("DRAFT-refusals-rf", other)["error"]
-    first = server.write_price_review("DRAFT-refusals-rf")["request"]
-    assert server.write_price_review("DRAFT-refusals-rf")["request"] == first  # the same request, not a new one
-    no_sources = {**data, "sources": []}
-    agent.save_draft("rf2", "DRAFT-nosources-rf2", no_sources, "")
-    assert "cites no source records" in server.write_price_review("DRAFT-nosources-rf2", approve("DRAFT-nosources-rf2"))["error"]
-    bogus = {**data, "sources": [{**data["sources"][0], "record_id": 999999999}]}
-    agent.save_draft("rf3", "DRAFT-bogus-rf3", bogus, "")
-    assert "do not exist: [999999999]" in server.write_price_review("DRAFT-bogus-rf3", approve("DRAFT-bogus-rf3"))["error"]
+def test_write_refusals():
+    run = package_run("refusals")
+    assert "full name" in server.write_price_review(run, "  ")["error"]
+    assert "format is one of" in server.write_price_review(run, "Ada", "pdf")["error"]
+    empty = db.start_run("item", "nothing yet", BASE, [{"line": "1", "item": "x", "quantity": None, "prices": {"P": 1}}], ["P"])
+    assert "nothing to report" in server.write_price_review(empty, "Ada")["error"]
 
 
-def test_opening_the_draft_only_when_asked(package, monkeypatch):
-    lines, states, bidders, checks = package
-    data = report.build("pkg", lines, states, bidders, checks, BASE, "op")
-    with mock.patch("subprocess.run") as run:
-        agent.save_draft("op", "DRAFT-open-op", data, "")
-        run.assert_not_called()
-        monkeypatch.setenv("FAIRPRICE_OPEN_DRAFT", "1")
-        agent.save_draft("op", "DRAFT-open-op", data, "")
-        run.assert_called_once()
-    monkeypatch.setattr("sys.platform", "win32")
-    with mock.patch("os.startfile", create=True) as start:
-        agent.save_draft("op", "DRAFT-open-op", data, "")
-    start.assert_called_once()
+def test_budget_columns_when_the_boq_has_budgets():
+    record, lines, states = server.review(package_run("budgets", budget=100e6))
+    data = report.build("pkg", lines, states, record.bidders, record.checks, BASE, "b1")
+    a, b = data["prices"][0], data["prices"][1]
+    assert (a["budget_per_item"], a["times_budget"], b["times_budget"]) == (100e6, 0.95, 3.0)
+    assert data["prices"][3]["budget_per_item"] is None  # line 2 has no budget
+    assert "Well above past prices (" in report.summary(lines, states, record.bidders, [], BASE) and \
+        "3× the budget" in report.summary(lines, states, record.bidders, [], BASE)
+    ws = load_workbook(io.BytesIO(report.files(data, "B", "xlsx")["B.xlsx"]))["Prices"]
+    assert ws["I1"].value == "Budget per item (NGN)" and ws["H1"].value == "Result"
+    assert ws["H3"].fill.fgColor.rgb.endswith("F8D7D7")  # the result colour stays on the Result column

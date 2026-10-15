@@ -24,11 +24,15 @@ dependencies = [
 [project.scripts]
 fairprice = "fairprice.agent:main"
 fairprice-ingest = "fairprice.ingest:main"
+fairprice-server = "fairprice.server:main"
 fairprice-evals = "fairprice.evals:main"
 
 [project.optional-dependencies]
 s3 = [
     "boto3>=1.43.111",
+]
+openai-compatible = [
+    "langchain-openai>=1.7.1",
 ]
 
 [build-system]

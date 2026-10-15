@@ -1,8 +1,8 @@
 """Load each country's OCDS publications from the OCP Data Registry, plus World Bank inflation and exchange rates.
 
-  uv run fairprice-ingest              build the database (on a fresh install: download Kenya and Nigeria first)
-  uv run fairprice-ingest --list       countries with data on the registry, and which are loaded
-  uv run fairprice-ingest --add RW     add a country by ISO code: every publication it has, then rebuild
+  uv run fairprice-ingest --list       countries with data on the registry (with their codes), and which are loaded
+  uv run fairprice-ingest --add NG     add a country by ISO code: every publication it has, then rebuild
+  uv run fairprice-ingest --rebuild    rebuild the database from the files already downloaded
 
 A country's publications (Nigeria has the federal BPP and its states) are downloaded unchanged and joined into
 one file per country, data/raw/<country>.jsonl.gz. data/raw/manifest.json records which publications each file
@@ -29,8 +29,7 @@ RAW = ROOT / "data" / "raw"
 MANIFEST = RAW / "manifest.json"
 STATUS = ROOT / "data" / "ingest-status.json"
 REGISTRY = "https://data.open-contracting.org"
-DEFAULT_COUNTRIES = ["KE", "NG"]
-# Kenya PPRA and Nigeria BPP go first, in this order: the eval cases refer to their record ids.
+# Kenya PPRA and Nigeria BPP go first, in this order, when loaded together: the eval cases refer to their record ids.
 FIRST = [147, 64]
 # Files loaded before there was a manifest: each holds exactly one publication.
 LEGACY = [
@@ -43,7 +42,12 @@ ITEMS_SHARE = 0.5  # ponytail: a reading is chosen when at least half the public
 
 TABLES_SQL = """
 CREATE OR REPLACE TABLE release_info AS  -- the few fields lines need, so joins never carry the full documents
-SELECT source, country, release_id, ocid, doc->>'$.buyer.name' AS buyer FROM releases;
+SELECT source, country, release_id, ocid,
+       coalesce(nullif(trim(doc->>'$.buyer.name'), ''),  -- some publishers leave buyer.name empty and name
+                nullif(trim(doc->>'$.tender.procuringEntity.name'), ''),  -- the buyer elsewhere in the record
+                (SELECT nullif(trim(p->>'$.name'), '') FROM unnest(CAST(doc->'$.parties' AS JSON[])) AS t(p)
+                 WHERE (p->>'$.roles') LIKE '%"buyer"%' OR (p->>'$.roles') LIKE '%"procuringEntity"%' LIMIT 1)) AS buyer
+FROM releases;
 
 CREATE OR REPLACE TABLE awards AS
 SELECT r.source, r.country, r.release_id, a->>'$.id' AS award_id,
@@ -283,7 +287,8 @@ def main(argv=None):
     p = argparse.ArgumentParser(prog="fairprice-ingest", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--list", action="store_true", help="list countries with data on the registry")
-    p.add_argument("--add", metavar="CODE", help="ISO country code to add, e.g. RW")
+    p.add_argument("--add", metavar="CODE", help="ISO country code to add, e.g. NG (see --list)")
+    p.add_argument("--rebuild", action="store_true", help="rebuild the database from the files already downloaded")
     args = p.parse_args(argv)
     if args.list:
         have = {p["country"] for p in manifest()}
@@ -291,7 +296,11 @@ def main(argv=None):
             print(f"{c['code']:<4} {c['name']:<34} {c['publications']:>2} publication(s)"
                   + ("  (loaded)" if c["code"] in have else ""))
         return
-    codes = [args.add] if args.add else ([] if manifest() else DEFAULT_COUNTRIES)
+    if not args.add and not args.rebuild:
+        p.error("give a country code to load, e.g. --add NG (Nigeria); --list shows every country and its code")
+    if args.rebuild and not manifest():
+        raise SystemExit("Nothing downloaded yet to rebuild from. Load a country first, e.g. --add NG.")
+    codes = [args.add] if args.add else []
     status(state="running", countries=codes or "rebuild", started=dt.datetime.now().isoformat(timespec="seconds"),
            finished=None, message=None, pid=os.getpid())
     try:

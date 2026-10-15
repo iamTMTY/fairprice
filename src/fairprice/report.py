@@ -16,7 +16,9 @@ from openpyxl.styles import Alignment, Font, PatternFill
 
 from fairprice.server import assess, rows
 
-DRAFT_STATUS = "DRAFT – not approved"  # until approved; then "Approved by <name> on <date>"
+DRAFT_STATUS = "Not approved"  # a report built but not written; a written one says "Approved by <name> on <date>"
+NOTICE = ("Evidence prepared by FairPrice for the evaluation committee. It does not rank bidders or decide anything; "
+          "the committee decides.")
 
 SYMBOL = {"NGN": "₦", "KES": "KSh "}
 STATUS = {  # code: (label, icon, fill colour)
@@ -33,6 +35,8 @@ FLAG_TEXT = {
     "no_quantity_published": "no quantity was published, so there is no price per item",
     "duplicate of an earlier record": "a duplicate of another record of the same purchase",
     "test_record": "a test entry the portal published by mistake (buyer “Test Ministry”)",
+    "value_zero_or_negative": "the published value is zero or negative, an entry error",
+    "price_below_one": "the price per item is below 1, almost certainly an entry error",
 }
 
 
@@ -57,7 +61,10 @@ def plain_reason(reason):
         return "Second check: " + reason.removeprefix("Challenger: ")
     parts = []
     for part in reason.split(", "):
-        if part.startswith("invalid_date:"):
+        if part.startswith("extreme_value:"):
+            parts.append(f"an extreme value: {part.split(':')[1]}× the median of the other comparable records "
+                         "(a typing error, or a total entered as a price per item)")
+        elif part.startswith("invalid_date:"):
             year = part.split(":")[1]
             parts.append("the date is missing or a placeholder" + (f" ({year})" if year != "None" else ""))
         else:
@@ -96,7 +103,10 @@ def cells(lines, states, bidders):
             if status is None:
                 ratio, a = assess(price, band["median"])
                 status = a.split(":")[0]
-            out[(entry["line"], b)] = {"price": price, "status": status, "ratio": ratio}
+            budget = entry.get("budget")
+            out[(entry["line"], b)] = {"price": price, "status": status, "ratio": ratio,
+                                       "budget": budget, "times_budget": round(price / budget, 2)
+                                       if price is not None and budget else None}
     return out
 
 
@@ -119,7 +129,7 @@ def sources(lines, states):
 
 
 def check_text(c, cur):
-    """A bid file problem as one plain sentence, naming where in the file it came from."""
+    """A bid file problem as plain sentences, naming where in the file it came from."""
     where = f"{c['bidder']}, line {c['line']}" + (f" ({c['where']})" if c.get("where") else "")
     d = c.get("data") or {}
     if c["check"] == "arithmetic_error":
@@ -136,9 +146,9 @@ def check_text(c, cur):
     return f"{where}: {c['check']}."
 
 
-def draft_name(item, run_id):
+def file_name(item, run_id):
     """The report's name in the reports table; its files add an extension (and -prices/-sources for csv)."""
-    return f"DRAFT-{re.sub(r'[^a-z0-9]+', '-', item.lower()).strip('-')[:40]}-{run_id}"
+    return f"{re.sub(r'[^a-z0-9]+', '-', item.lower()).strip('-')[:40]}-{run_id}"
 
 
 def summary(lines, states, bidders, checks, base):
@@ -152,7 +162,8 @@ def summary(lines, states, bidders, checks, base):
             c = cs[(entry["line"], b)]
             label, icon, _ = STATUS[c["status"]]
             ratio = f" ({c['ratio']:g}× typical)" if c["status"] in ("above_band", "below_band") else ""
-            out.append(f"    {b:<20} {money(c['price'], cur, True):>10}  {icon} {label}{ratio}")
+            over = (f"; {c['times_budget']:g}× the budget" if c["times_budget"] and c["times_budget"] > 1 else "")
+            out.append(f"    {b:<20} {money(c['price'], cur, True):>10}  {icon} {label}{ratio}{over}")
     if checks:
         out.append(f"Problems in the bid files: {len(checks)}")
         out += [f"    - {check_text(c, cur)}" for c in checks]
@@ -168,6 +179,7 @@ def build(title, lines, states, bidders, checks, base, run_id, model=""):
     cur, year = base["currency"], base["year"]
     cs = cells(lines, states, bidders)
     refs, info = sources(lines, states)
+    budgets = any(e.get("budget") for e in lines)  # the budget columns only when the BoQ has budgets
     prices = []
     for entry in lines:
         final = (states.get(entry["line"]) or {}).get("final") or {}
@@ -178,29 +190,44 @@ def build(title, lines, states, bidders, checks, base, run_id, model=""):
                 "line": entry["line"], "item": entry["item"], "quantity_requested": entry["quantity"], "bidder": b,
                 "quoted_price": c["price"], "typical_past_price": round(band["median"]) if band else None,
                 "times_typical": c["ratio"], "result": STATUS[c["status"]][0],
+                **({"budget_per_item": c["budget"], "times_budget": c["times_budget"]} if budgets else {}),
                 "past_purchases_compared": band["n"] if band else len(final.get("accepted", [])),
                 "sources": sorted(refs[r["id"]] for r in final.get("accepted", [])),
                 "problems": [check_text(k, cur) for k in checks or []
                              if b in k["bidder"].split(", ") and entry["line"] in str(k["line"]).split(", ")]})
     adjusted = {r["id"]: r["adjusted_unit_price"] for st in states.values()
                 for r in ((st or {}).get("final") or {}).get("accepted", [])}
-    srcs = [{"ref": n, "bought_by": (info[i]["buyer"] or "").title(), "year": info[i]["year"],
+    srcs = [{"ref": n, "bought_by": (info[i]["buyer"] or "").title() or "(buyer not published)", "year": info[i]["year"],
              "what_was_bought": info[i]["description"], "quantity": info[i]["quantity"],
              "paid_per_item": info[i]["unit_price"], "currency": info[i]["currency"],
              "adjusted_price": round(adjusted[i], 2) if i in adjusted else None,
              "published_by": info[i]["publisher"], "ocid": info[i]["ocid"], "contract_id": info[i]["line_id"],
-             "dataset": info[i]["source"], "record_id": i} for i, n in refs.items()]
-    return {"report": {"title": title, "status": "draft", "approved_by": None, "approved_at": None,
+             "dataset": info[i]["source"], "used": used(i, states), "record_id": i} for i, n in refs.items()]
+    how = [{"line": e["line"], "item": e["item"],
+            "plan": (states.get(e["line"]) or {}).get("plan"),
+            "searches": (states.get(e["line"]) or {}).get("searches", []),
+            "assessment": ((states.get(e["line"]) or {}).get("final") or {}).get("assessment"),
+            "second_check": {k: v for k, v in ((states.get(e["line"]) or {}).get("challenge") or {}).items()
+                             if k in ("verdict", "reason", "applied")} or None,
+            "objections": {str(k): v for k, v in (((states.get(e["line"]) or {}).get("challenge") or {}).get("remove") or {}).items()}}
+           for e in lines]
+    return {"report": {"title": title, "notice": NOTICE, "status": "draft", "approved_by": None, "approved_at": None,
                        "prepared_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
                        "prepared_by": f"FairPrice ({model})" if model else "FairPrice", "run_id": run_id,
                        "currency": cur, "prices_in_year": year, "country": base["country"],
                        "bid_file_checks": [check_text(k, cur) for k in checks] if checks is not None else None},
-            "prices": prices, "sources": srcs}
+            "prices": prices, "sources": srcs, "lines": how}
 
 
-def cited(data):
-    """The record ids a report relies on, read from the report itself."""
-    return [s["record_id"] for s in data["sources"]]
+def used(record, states):
+    """"Yes", or "No: <why>" for a record a price check left out (a flag, the Analyst's or the second check's reason)."""
+    for st in states.values():
+        final = (st or {}).get("final") or {}
+        if any(r["id"] == record for r in final.get("accepted", [])):
+            return "Yes"
+    reasons = [e["reason"] for st in states.values() for e in ((st or {}).get("final") or {}).get("excluded", [])
+               if e["id"] == record]
+    return f"No: {plain_reason(reasons[0])}" if reasons else "No"
 
 
 def status_line(data):
@@ -218,12 +245,14 @@ def headings(data):
               "quoted_price": f"Quoted price per item ({cur})",
               "typical_past_price": f"Typical past price ({cur}, {year} money)",
               "times_typical": "Times the typical price", "result": "Result",
+              "budget_per_item": f"Budget per item ({cur})", "times_budget": "Times the budget",
               "past_purchases_compared": "Past purchases compared",
               "sources": "Sources (Ref numbers)", "problems": "Problems in this bid"}
     srcs = {"ref": "Ref", "bought_by": "Bought by", "year": "Year", "what_was_bought": "What was bought",
             "quantity": "Quantity", "paid_per_item": "Paid per item", "currency": "Currency",
             "adjusted_price": f"In {year} money ({cur})", "published_by": "Published by",
             "ocid": "Official record (OCID)", "contract_id": "Contract ID", "dataset": "Dataset",
+            "used": "Used in the comparison",
             "record_id": "FairPrice audit ID"}
     flat = lambda k, v: (ranges(v) if k == "sources" else " ".join(v) if k == "problems"
                          else f"L{v}" if k == "record_id"
@@ -280,14 +309,16 @@ def workbook(data, prices, srcs):
     wb = Workbook()
     ws = wb.active
     ws.title = "Prices"
-    table(ws, prices, (6, 30, 11, 18, 16, 18, 11, 24, 11, 16, 60), status,
+    budgets = bool(prices) and f"Budget per item ({cur})" in prices[0]
+    table(ws, prices, (6, 30, 11, 18, 16, 18, 11, 24) + ((16, 11) if budgets else ()) + (11, 16, 60), status,
           {f"Quoted price per item ({cur})": money_fmt, f"Typical past price ({cur}, {year} money)": money_fmt,
-           "Times the typical price": '0.00"×"'})
+           "Times the typical price": '0.00"×"', f"Budget per item ({cur})": money_fmt, "Times the budget": '0.00"×"'})
+    ws.cell(len(prices) + 4, 1, NOTICE)
     fills = {label: colour for label, _, colour in STATUS.values() if colour}
     for row, r in enumerate(data["prices"], 2):
         if fill := fills.get(r["result"]):
             ws.cell(row, 8).fill = PatternFill("solid", fgColor=fill)
-    table(wb.create_sheet("Sources"), srcs, (6, 28, 7, 60, 9, 15, 9, 16, 30, 30, 12, 40, 14), status,
+    table(wb.create_sheet("Sources"), srcs, (6, 28, 7, 60, 9, 15, 9, 16, 30, 30, 12, 40, 50, 14), status,
           {"Paid per item": money_fmt, f"In {year} money ({cur})": money_fmt})
     out = io.BytesIO()
     wb.save(out)

@@ -1,14 +1,17 @@
 # FairPrice
 
-An agent that prepares sourced price evidence for a public tender evaluation committee. Give it one item and a price, or a whole bid package (every bidder's price schedule for one procurement). For each line it:
+An MCP server, with its own agent, that tells a public tender evaluation committee whether quoted prices are reasonable, using the messy award data governments publish. Give it one item and a price, or a bid package (every bidder's price schedule for one procurement). For each line it:
 
-1. finds comparable past awards in published Open Contracting data;
-2. rejects records that are not truly comparable;
-3. adjusts prices for inflation;
-4. has a second agent try to disprove the result;
-5. checks the bid files for arithmetic errors, missing lines and changed quantities.
+1. finds comparable past awards in published Open Contracting data, and handles the data's known problems openly: placeholder dates, test records, duplicates, bundles, lot prices, extreme values, missing quantities and missing buyer names (see [Data quality](#data-quality-what-the-published-data-gets-wrong-and-what-fairprice-does));
+2. rejects records that are not truly comparable, with a reason for each;
+3. adjusts prices for inflation and currency;
+4. has a second agent try to disprove the result.
 
-It then drafts a report in which every number comes from a tool and every record is cited, and waits for a named officer to approve it.
+It also checks the bid files for arithmetic errors, missing lines and changed quantities. Then a person reads the summary and approves it, and the report is written under their name, with every number from a tool and every record cited.
+
+**The human stays in charge because FairPrice only produces evidence.** It never ranks bidders, recommends one or decides anything; the committee does, in its own process.
+
+**The product is the MCP server** (`fairprice-server`). It runs on one computer for one person, or as a web server that procurement systems and other AI apps connect to with access keys, each organisation seeing only its own reviews. The `fairprice` command line is one client of it.
 
 **FairPrice never totals, ranks or recommends bidders, and never decides an award.** The committee does.
 
@@ -20,7 +23,7 @@ Tested on macOS (Apple M5, 16 GB RAM). You need:
 
 - about 12 GB of free disk space (10 GB for the model, 2 GB for the database);
 - 16 GB of RAM;
-- an internet connection for setup and the first run only.
+- an internet connection for setup and for loading a country's data.
 
 ### 1. Install uv (the Python package manager)
 
@@ -61,6 +64,32 @@ On that machine, start Ollama so other computers can reach it (`OLLAMA_HOST=0.0.
 
 **Another model.** Set `FAIRPRICE_MODEL`, for example `FAIRPRICE_MODEL=ollama:qwen3:8b` (after `ollama pull qwen3:8b`). The evals in EVALS.md were measured with `gemma4`; other models will behave differently.
 
+**Other ways to run an open-weights model.** Instead of Ollama, FairPrice can use any server on your own computer or network that offers an OpenAI-compatible API: LM Studio, llama.cpp's `llama-server`, Apple's `mlx_lm.server`, Jan, LocalAI, vLLM, SGLang, Hugging Face TGI or NVIDIA NIM.
+
+```bash
+uv sync --extra openai-compatible                       # once
+FAIRPRICE_MODEL=openai:<the model name the server uses>
+FAIRPRICE_MODEL_URL=http://localhost:1234/v1             # the server's address (this one is LM Studio's default)
+FAIRPRICE_MODEL_API_KEY=...                              # only if the server was started with a key
+```
+
+Three things to set on the server itself:
+
+- **Tool calling must be on.** FairPrice's agent works by calling tools. vLLM needs `--enable-auto-tool-choice --tool-call-parser <parser for the model>`; llama.cpp needs `--jinja`; in LM Studio, pick a model marked for tool use.
+- **A context window of at least 16,000 tokens.** With Ollama, FairPrice sets this itself; on these servers it is a server option (for example `-c 16384` for llama.cpp, `--max-model-len 16384` for vLLM, the context-length setting in LM Studio).
+- **Thinking mode off**, for models that have one, where the server allows it.
+
+`uv run fairprice --check` (and every run) checks that the server is reachable, serves that model, and actually calls tools: it sends one short test request and, if the model answers in text instead, says which setting to change. FairPrice refuses `openai:` models without `FAIRPRICE_MODEL_URL`, so it never sends procurement data to a hosted API by default.
+
+`--check` also sends one long test prompt to see whether the server reads it whole; a server that silently cuts long conversations makes the agent lose its own search results and repeat the same search.
+
+**What we tested.** We ran this route against Ollama's own OpenAI-compatible endpoint (`FAIRPRICE_MODEL_URL=http://localhost:11434/v1`), which serves the same Gemma 4:
+
+- With Ollama's default context window, the server cut each conversation to about 800 tokens, and Gemma repeated the same search 15 times without ever checking a price. That is why `--check` now tests the context window.
+- With a 16,384-token window (a Modelfile with `PARAMETER num_ctx 16384`), the run worked: it searched, built a band and reached the approval gate in 5 model calls. But this route cannot switch Gemma's thinking off, so it wrote about 6,900 output tokens instead of about 1,000 and took 6 minutes instead of under 2.
+
+The evals in EVALS.md were all run on the native Ollama route, not this one. Run `--check` and a short eval (`uv run fairprice-evals --cases hilux-above,no-benchmark --repeats 1`) before relying on a new server.
+
 ### 3. Get the code
 
 ```bash
@@ -79,7 +108,7 @@ uv run fairprice --check
 
 ```
 ✓ Model ollama:gemma4 at http://localhost:11434
-• Procurement data: not built yet; the first run downloads about 60 MB, or run `uv run fairprice-ingest`
+• Procurement data: none loaded yet. Load a country's procurement data first, e.g. Nigeria: uv run fairprice-ingest --add NG …
 • Borrowed DuckDB MCP server: downloads on the first run (needs internet once)
 ✓ Reports: local storage, xlsx files
 ✓ Database for runs, reports and the audit log: reachable
@@ -88,32 +117,57 @@ Ready.
 
 Anything marked ✗ comes with the fix, for example `Ollama is not reachable at http://localhost:11434 … Install it from https://ollama.com/download and open it, or set OLLAMA_HOST to where it runs` or `Run ollama pull gemma4`. Every run makes the same check first and stops with the same message instead of failing halfway.
 
-### 5. Run it
+### 5. Load a country's data
+
+FairPrice loads nothing until you choose a country, by its ISO code:
+
+```bash
+uv run fairprice-ingest --add NG     # Nigeria: about 16 MB, under a minute
+```
+
+| Code | Country | What its published data supports |
+|---|---|---|
+| `NG` | Nigeria (13 publications: federal BPP, 11 states, Budeshi) | Prices per item for single-item contracts. **Start here.** |
+| `KE` | Kenya (PPRA, Makueni County) | Award totals only: searchable, but no prices per item |
+| `RW` | Rwanda (RPPA) | A price for each contract item (tested) |
+| `GH` | Ghana | Not tested yet |
+| `LR` | Liberia | Not tested yet |
+| `TZ` | Tanzania | Not tested yet |
+| `UG` | Uganda | Not tested yet |
+| `ZA` | South Africa | Not tested yet |
+| `ZM` | Zambia | Not tested yet |
+
+`uv run fairprice-ingest --list` shows all 72 countries on the registry with their codes. What a country's data can support is detected when it is loaded (see the table below).
+
+The first command also creates a local Python environment in `.venv/` and installs the packages (under a minute). After loading, everything runs offline.
+
+### 6. Run it
 
 ```bash
 uv run fairprice "Toyota Hilux double cabin pickup" --unit-price 120000000 --year 2025
 ```
 
-That is the one command. The first time, it also:
+A run compares against **one country**. With one country loaded it uses that one; with several, it asks, with the same arrow-key menu as the decision at the end (or give `--country NG`). It then says which:
 
-1. creates a local Python environment in `.venv/` and installs the packages (under a minute);
-2. downloads about 60 MB of public procurement data (every Nigerian and Kenyan publication) and builds a local database in `data/` (a few minutes).
+```
+Country: Nigeria (NG) · prices in NGN
+```
 
-After that, everything runs offline. Each item takes about 2 minutes on the laptop above.
+Each item takes about 2 minutes on the laptop above.
 
 **Cost of a run.** Every run ends with what it cost, for example:
 
 ```
-Cost of this run: 9 model calls, 41,203 input and 1,876 output tokens, 98 s of model time, API fees USD 0.00 (local model).
+Cost of this run: 34 model calls, 131,498 input and 7,356 output tokens, 457 s of model time, API fees $0.00 (local model)($0.01 saved)
 ```
 
-The same figures are stored with the report (in its JSON, under `report.cost`) and in the audit log (`uv run fairprice --audit <run id>`). With a local model there are no API fees. If you point FairPrice at a paid provider, set its prices (`FAIRPRICE_PRICE_PER_MILLION_INPUT_TOKENS`, `FAIRPRICE_PRICE_PER_MILLION_OUTPUT_TOKENS`, `FAIRPRICE_PRICE_CURRENCY`) and the fee is worked out per run. EVALS.md gives measured tokens per run for each eval task.
+With a local model there are no API fees; the amount saved is what the same tokens would cost on the closest hosted model (for Ollama's `gemma4`, the smallest Gemma 4 on OpenRouter). With an API model the line shows the fee instead: `API fees $0.01`. Prices come from OpenRouter's public price list (no key needed), cached in `data/model-prices.json` and refreshed weekly. To use your own price instead (a negotiated rate), set `FAIRPRICE_PRICE_PER_MILLION_INPUT_TOKENS` and `…_OUTPUT_TOKENS` in US dollars. The same figures, and which model they were priced as, are stored with the report (in its JSON, under `report.cost`) and in the audit log (`uv run fairprice --audit <run id>`). EVALS.md gives measured tokens per run for each eval task.
 
-At the end, a short summary is printed with the draft report's location; open it in Excel, Numbers or LibreOffice (or set `FAIRPRICE_OPEN_DRAFT=1` to open it automatically). It is saved as `reports/DRAFT-<item>-<run id>.xlsx` and marked "DRAFT – not approved". Then you pick a decision with the arrow keys and Enter, or by pressing 1, 2 or 3:
+At the end, a short summary is printed. You pick a decision with the arrow keys and Enter, or by pressing 1, 2 or 3:
 
-- `approve`: you are asked for your full name. The final report is written with "Approved by <your name> on <date>" in place of "DRAFT – not approved", under a name without "DRAFT", and the draft is deleted;
-- `revise`: you say what to investigate. The draft is deleted, the agent runs again, and a new draft opens;
-- `reject`: the draft is deleted and nothing is kept.
+- `approve`: you are asked for your full name, and the report is written to `reports/` with "Approved by <your name> on <date>";
+- `revise`: you say what to investigate, and the agent runs again;
+- `reject`: nothing is written.
 
 The report has two tables:
 
@@ -134,35 +188,55 @@ Whatever the format, the report is also kept as data in the `reports` table of `
 
 ```bash
 uv run fairprice --package examples/bid-package.xlsx --year 2025    # or .csv, or .json
+uv run fairprice --template package.xlsx                             # a blank package to fill in
 ```
 
-`examples/bid-package.xlsx`, `.csv` and `.json` are the same **synthetic** package in three forms: three invented bidders, invented prices and four planted problems. Use them as templates. All three must match one schema, [`src/fairprice/bid_package.schema.json`](src/fairprice/bid_package.schema.json), which another system can use to check a file before sending it.
+A bid package is the bill of quantities and each bidder's price schedule:
 
-| Form | Layout |
+| Sheet | What goes in it |
 |---|---|
-| xlsx | A sheet named `BoQ` with columns `line`, `item`, `quantity`. One sheet per bidder, named after the bidder, with columns `line`, `unit_price`, and optionally `quantity`, `total`, `item`. |
-| csv | One file with columns `bidder`, `line`, `item`, `quantity`, `unit_price`, `total`. Rows whose bidder is `BoQ` are the bill of quantities; every other value is a bidder. |
-| json | `{"boq": [{"line", "item", "quantity"}], "bids": [{"bidder", "lines": [{"line", "unit_price", "quantity", "total"}]}]}` |
+| **BoQ** | Item No, Description, Unit, Quantity, and optionally Budget per unit |
+| **One sheet per bidder**, named after the bidder | That bidder's price schedule: Item No, Unit Price, and optionally Description, Unit, Quantity, Total Price |
 
-**FairPrice does not interpret a package; it checks it.** Column names must be exactly those above. Prices must be plain numbers (`2500000`, `2,500,000` or `2500000.50`). Every bid line must be a line in the BoQ. A package that breaks any rule is refused before any analysis, with each problem and where it is, for example:
+**Bids are not published anywhere, so the package is invented.** `examples/bid-package.xlsx`, `.csv` and `.json` are the same **synthetic** package in three forms: one line (a Toyota Hilux), three invented bidders, invented prices and two planted problems, small enough to run in a few minutes. The eval suite uses a 3-line version in `evals/packages/`. FairPrice is built on the other half of the brief, the real published award data; the package is only the way to hand it prices to check. All three forms must match one schema, [`src/fairprice/bid_package.schema.json`](src/fairprice/bid_package.schema.json), which another system can use to check a file before sending it.
+
+The price columns are those of a standard price schedule (Item No, Description, Unit, Quantity, Unit Price, Total Price), so a bidder's schedule can usually be pasted in as it is. The headings procuring entities commonly use for the same columns are accepted too:
+
+| Field | Accepted headings (any case; notes in brackets and a currency such as "in KES" are ignored) | Where |
+|---|---|---|
+| line | Item No, Item Number | BoQ and bids (required) |
+| item | Description, Description of Goods | BoQ (required), bids (optional) |
+| unit | Unit, Unit of Issue, Unit of Measure | optional |
+| quantity | Quantity, Qty | BoQ (required), bids (optional) |
+| unit_price | Unit Price, Rate, Unit Rate | bids (required) |
+| total | Total Price, Total Amount, Total | bids (optional) |
+| country_of_origin | Country of Origin | bids (optional) |
+| budget | Budget per unit | BoQ (optional): the procuring entity's budget per unit, shown in the report against each quote |
+| bidder | Bidder, Tenderer | csv only |
+
+So KRA's "Rate in KES (VAT inclusive)" and "Total Amount (KES)" read as the unit price and the total.
+
+**FairPrice does not interpret a package; it checks it.** Every column must have one of the headings above, and only one column may have each meaning. Prices must be plain numbers (`2500000`, `2,500,000` or `2500000.50`). Every bid line must be a line in the BoQ. A package that breaks any rule is refused before any analysis, with each problem and where it is, for example:
 
 ```
-- sheet “Bidder B”, row 1: unknown column(s) rate; the columns are line, unit_price, quantity, total, item
-- bid-package.csv, row 7, unit_price: 'NGN 2,500,000' is not a number
+- sheet “Bidder B”, row 1: unknown column(s) Price per piece; the columns are Item No, Description, Unit, Quantity, Unit Price, Total Price, Country of Origin
+- bid-package.csv, row 7, Unit Price: 'NGN 2,500,000' is not a number
 - bids[0].lines[0]: 'unit_price' is a required property
 ```
 
-Problems are reported in two passes: cells that cannot be read first, then rules such as lines missing from the BoQ. A bid with mistakes in its numbers (totals that do not add up, missing lines, changed quantities) is read; those mistakes are findings for the committee, not reasons to refuse the file.
+Problems are reported in two passes: cells that cannot be read first, then rules such as lines missing from the BoQ. A bid with mistakes in its numbers (totals that do not add up, missing lines, changed quantities) is read; those are findings for the committee, not reasons to refuse the file.
 
 Before the agent starts, FairPrice prints what it read, so a wrong file is caught in seconds:
 
 ```
-Read bid-package.xlsx: BoQ with 3 lines, 3 bidders
+Read package.xlsx: BoQ with 3 lines, 3 bidders
   Bidder A: 3 of 3 lines priced
   Bidder C: 2 of 3 lines priced (not priced: 3)
 ```
 
-**What you get:** one draft report for the whole package, in the same two-table layout and your chosen format. The bid file checks appear in each bidder's "Problems in this bid" column, in plain sentences that name the sheet and row: totals that do not add up, missing lines, quantities that differ from the bill of quantities, and bidders quoting identical prices on most lines. Bidders appear in the order the file lists them, and are never totalled or ranked.
+**What you get:** one report for the whole package, in your chosen format: each quote against past prices and, if the BoQ has budgets, against the budget ("Times the budget"); and each bidder's problems in plain sentences that name the sheet and row: totals that do not add up, missing lines, quantities that differ from the bill of quantities, and bidders quoting identical prices on most lines. Findings state facts, not law: what a finding means is for the committee under its own rules. Bidders appear in the order the file lists them, and are never totalled, ranked or recommended.
+
+**Why the price comparison is a step in the procedure, not an extra.** Kenya's PPRA standard tender document tells the procuring entity what to do with an abnormally high tender (ITT 36): "make a survey of the market prices" and "check if the estimated cost of the contract is correct". In Nigeria, BPP's Price Intelligence Unit reviews project costs against benchmark unit rates before approval. FairPrice does that survey from published past awards, with every price sourced; with a budget in the BoQ, it also shows whether the budget itself is in line with past prices.
 
 You approve, revise or reject the package once. On `revise`, you also choose which lines to redo.
 
@@ -170,7 +244,7 @@ The agent runs once per distinct item, not once per bidder, so three bidders tak
 
 ### Designed, not built yet: reading bid files in any layout
 
-Real bids arrive in many layouts: title rows above the headings, "Rate" or "Amount" instead of `unit_price` and `total`, VAT and subtotal rows. Today a committee copies such a schedule into the template by hand. That is deliberate: a person, not FairPrice, decides what "Rate" means.
+Real bids still arrive in layouts the headings above do not cover: title rows above the headings, merged cells, section rows ("Glazing", "Gypsum boards"), VAT and subtotal rows. Today a committee copies such a schedule into the template by hand. That is deliberate: a person, not FairPrice, decides what an unfamiliar column means.
 
 The next step we designed is to let the model propose the mapping, never the values:
 
@@ -183,15 +257,14 @@ We did not build it for this submission. Bids are not published anywhere, so we 
 ## Other commands
 
 ```bash
-uv run fairprice --resume <run id>                       # continue a run paused at the approval gate
+uv run fairprice --resume <run id>                       # continue a run paused at the decision
 uv run fairprice --package file.xlsx --resume <batch id>  # rerun a package, reusing the lines that finished
 uv run pytest --cov                                      # unit and integration tests, with coverage (about 40 s, no model needed)
 uv run fairprice-evals --repeats 2                       # run the eval suite (see EVALS.md); about an hour
 uv run fairprice-evals --cases bid-package --repeats 1   # run one eval case
-uv run fairprice-ingest                                  # rebuild the database from the loaded publications
+uv run fairprice-ingest --rebuild                        # rebuild the database from the files already downloaded
 FAIRPRICE_MODEL=ollama:qwen3:8b uv run fairprice ...     # use another model (ollama pull qwen3:8b first)
 uv run fairprice --audit <run or batch id>               # print a run's audit log: every tool call and decision
-uv run fairprice --approve [request id]                  # decide requests from AI apps to approve a report or add a country
 ```
 
 ## Configuration for a server
@@ -207,37 +280,73 @@ Put settings in a `.env` file next to `pyproject.toml` (copy `.env.example`, whi
 | `FAIRPRICE_REPORTS` | `reports/` | The folder for reports when `FAIRPRICE_STORAGE=file`. |
 | `FAIRPRICE_SQL_URL` | `sqlite:///data/runs.sqlite` | Where the audit log is kept, as a SQLAlchemy URL, e.g. `postgresql+psycopg://user:password@host/fairprice` (install that database's driver). Tested on SQLite only. Run state for `--resume` stays in `data/runs.sqlite`. |
 | `FAIRPRICE_REPORT_FORMAT` | `xlsx` | The report file format: `xlsx`, `csv` or `json`. `--format` overrides it for one run. |
-| `FAIRPRICE_OPEN_DRAFT` | `0` | Set to `1` to open the draft report automatically in Excel or Numbers. |
 | `OLLAMA_HOST` | `http://localhost:11434` | Where Ollama runs, if not on this computer. |
 | `FAIRPRICE_MODEL` | `ollama:gemma4` | The model, as `provider:model`. |
-| `FAIRPRICE_PRICE_PER_MILLION_INPUT_TOKENS`, `…_OUTPUT_TOKENS`, `FAIRPRICE_PRICE_CURRENCY` | `0`, `0`, `USD` | Prices for working out API fees per run, if you use a paid provider. |
+| `FAIRPRICE_COUNTRY` | none | The country offered first in the menu, and the one an app gets when it names none (otherwise the first loaded). |
+| `FAIRPRICE_MODEL_URL`, `FAIRPRICE_MODEL_API_KEY` | none | Your OpenAI-compatible server, for `FAIRPRICE_MODEL=openai:<name>` (see step 2). |
+| `FAIRPRICE_PRICE_PER_MILLION_INPUT_TOKENS`, `…_OUTPUT_TOKENS` | OpenRouter's price | Your own price in US dollars per million tokens, instead of OpenRouter's list. |
 
-With S3 storage, the draft and approved reports are shown as download links that work for one hour.
+With S3 storage, reports are shown as download links that work for one hour.
 
 **Where reports may go:** Reports can contain bidders' prices from an evaluation in progress, which are commercially confidential. Keep them inside your own organisation and jurisdiction: on this computer (the default), or in object storage you run yourself, such as MinIO on your own servers. Use a cloud provider only if your procurement and data rules allow it.
 
-## Use it from another AI app (MCP)
+## The MCP server: connect other tools
 
-`src/fairprice/server.py` is a standard MCP server. Any MCP client can start it with:
+### Tools
+
+| Tool | What it does |
+|---|---|
+| `start_review(item, unit_price, currency, year, country)` | Starts a review of one price; returns its `run_id`. The currency defaults to the country's. |
+| `start_package_review(package \| file + filename, title, currency, year, country)` | Starts a review of a bid package: as JSON, **or the workbook itself** (`file` is its contents in base64, `filename` ends in .xlsx, .csv or .json). The bid files are checked at once; problems come back with their sheet and row. |
+| `plan_searches(run_id, searches, notes, line)` | Records the search plan for a line |
+| `find_comparables(run_id, keywords, line, year_from, year_to, limit)` | Searches past awards in the review's country; every word must match, in any order |
+| `check_price_comparability(run_id, candidate_ids, rejected, line)` | The band and the verdict. Only records the review's own searches found count; the price, currency and year come from the review. |
+| `challenge_review(run_id, verdict, reason, objections, line)` | Records a second, independent check of a line |
+| `review_with_fairprice(run_id)` | **For apps that do not reason themselves** (a procurement portal): FairPrice's own agent reviews every line in the background, for a person to read before approving |
+| `review_status(run_id)` | Progress of that review; when done, a summary for a person to read |
+| `write_price_review(run_id, approved_by, format)` | Writes the report, built only from what the review recorded, with "Approved by <name> on <date>". The app calls it after the person named has read the review and approved it. `format`: xlsx, csv or json. |
+| `get_price_review(run_id)` | An approved report as JSON, with links to its files; without a run_id, the list |
+| `list_countries()`, `add_country(code)` | The countries with data, and loading one in the background |
+
+| Resource | What it is |
+|---|---|
+| `fairprice://bid-package/schema` | The bid package format (JSON Schema): BoQ and bids |
+| `fairprice://bid-package/example` | A complete example package |
+| `fairprice://bid-package/template.xlsx` | A blank package workbook (also at `/template.xlsx` on a web server) |
+| `ocds://line/{id}` | The published record behind a cited source |
+
+An app either does the reasoning itself (plan, search, check, challenge, then `write_price_review`), or hands the run to `review_with_fairprice` and follows `review_status`. Either way **it never sends a report, a price or a source list to be saved**: reports are built only from what the review's own tool calls recorded.
+
+### On one computer (stdio)
 
 ```bash
-uv run --directory /path/to/FairPrice python -m fairprice.server
+uv run --directory /path/to/FairPrice fairprice-server
 ```
 
-This gives the other app the tools (`find_comparables`, `check_price_comparability`, `write_price_review`, `get_price_review`, `list_countries`, `add_country`), but not the Challenger or the self-check, which are in the agent.
+Any MCP client (Claude Desktop, an IDE, your own app) can start it this way. There are no keys: everything belongs to this computer.
 
-**An AI app can never approve a report or add a country by itself.** When it calls `write_price_review` or `add_country`, the tool only records a request and replies with a command for a person to run:
+### As a web server (HTTP)
 
-```
-$ uv run fairprice --approve              # list the requests waiting
-$ uv run fairprice --approve 3f9a1c2b7d10e4a5
-An AI app asks to approve the price review DRAFT-laptop-computer-…: laptop computer, 1 prices, 12 sources.
-Decision (↑/↓ and Enter, or press a number)
-❯ 1. approve  carry it out now, under your name
-  2. reject   refuse it
+```bash
+export FAIRPRICE_PUBLIC_URL=https://fairprice.example.org      # where people and apps reach it
+export FAIRPRICE_SECRET=<a long random string>                   # signs report download links
+uv run fairprice-server --add-key ministry-of-works --name "e-GP portal"
+uv run fairprice-server --http --host 0.0.0.0 --port 8000
 ```
 
-The person sees what they are approving, chooses, and gives their name; the report is approved under that name, never a name the app supplied. Each approval works once, for that one report or country, and is recorded in the `approvals` table and the audit log. Inside FairPrice's own runs, the approval menu at the end of a run is that person.
+- **MCP at `/mcp`** (streamable HTTP). Every call needs `Authorization: Bearer <key>`. A key belongs to one organisation, and a caller sees only its own organisation's reviews and reports.
+- **Approval happens in the app.** The app shows the person the review and, if they approve, calls `write_price_review` with their name. FairPrice records which app wrote each report and when; who the person is, and whether they may approve, is the app's business, as it already is for everything else in the app.
+- **Report files** come back as signed links that work for one hour (or S3's own links with `FAIRPRICE_STORAGE=s3`).
+- **Every tool call is audited by the server**, whoever makes it: inputs, output, time, organisation and caller, in the `audit_log` table.
+- Keys are stored as hashes; the secret is shown once. Revoke one with `--revoke-key <id>`. Put the server behind HTTPS (a reverse proxy) when it leaves your own network. For several servers, point `FAIRPRICE_SQL_URL` at Postgres.
+- **Bid prices are confidential.** Run the server inside the procuring organisation or its government's own data centre.
+
+### The CLI as a client of a web server
+
+```bash
+export FAIRPRICE_SERVER_URL=https://fairprice.example.org FAIRPRICE_API_KEY=<app key>
+uv run fairprice --package package.xlsx --year 2025    # uploads it; the server's agent reviews it; you approve or reject here
+```
 
 ## If something goes wrong
 
@@ -245,8 +354,10 @@ The person sees what they are approving, chooses, and gives their name; the repo
 |---|---|
 | `Ollama is not reachable at …` | Ollama is not running, or runs elsewhere. Open the Ollama app, run `ollama serve`, or set `OLLAMA_HOST`. `uv run fairprice --check` shows what is wrong. |
 | `model "gemma4" not found` | Run `ollama pull gemma4`. |
-| The first run stops while downloading or building | Run the same command again. Finished downloads are kept; an unfinished build starts over. |
+| Loading a country stops while downloading or building | Run the same command again. Finished downloads are kept; an unfinished build starts over. |
+| `Load a country's procurement data first` | Nothing is loaded yet: `uv run fairprice-ingest --add NG` (or another code from the table in step 5). |
 | `… was not read: it does not match the bid package format` | Fix each listed problem; the templates in `examples/` show the exact layout. |
+| `Connection closed` when a run starts | One of the two MCP servers did not start. The borrowed DuckDB server writes its messages to `data/duckdb-server.log` instead of the screen; the reason is usually there. |
 | A run is very slow | About 2 minutes per item is normal on a laptop. Keep the computer awake and plugged in. |
 
 ## What is in the repo
@@ -255,7 +366,7 @@ The person sees what they are approving, chooses, and gives their name; the repo
 |---|---|
 | `src/fairprice/server.py` | Our MCP server: 6 tools and 1 resource |
 | `src/fairprice/storage.py` | Where reports are kept: local folder (default) or self-hosted S3-compatible storage |
-| `src/fairprice/agent.py` | The LangGraph agent, approval gate, audit log and CLI |
+| `src/fairprice/agent.py` | The LangGraph agent, the person's decision, and the CLI |
 | `src/fairprice/batch.py` | Bid packages: reading xlsx, csv and json against the schema, and the bid file checks |
 | `src/fairprice/bid_package.schema.json` | The bid package format (JSON Schema) |
 | `src/fairprice/report.py` | The report: its data, its xlsx, csv and json files, its plain-language wording, and the terminal summary |
@@ -264,11 +375,12 @@ The person sees what they are approving, chooses, and gives their name; the repo
 | `src/fairprice/evals.py`, `evals/cases.json` | The eval suite |
 | `tests/` | Unit and integration tests (99% line and branch coverage); see below |
 | `evals/classifier_experiment.py` | A model we tested and rejected (see EVALS.md) |
-| `examples/bid-package.xlsx`, `.csv`, `.json` | The same synthetic bid package in each form; templates |
+| `examples/bid-package.xlsx`, `.csv`, `.json` | The same synthetic bid package (one line) in each form |
+| `evals/packages/` | The 3-line synthetic bid package the eval suite uses |
 | `ARCHITECTURE.md` | Agent shape, MCP servers built and borrowed, and why |
 | `EVALS.md` | Test tasks, pass and fail results, run-to-run variation, an unfixed failure |
 
-Created when you run it (not in the repo): `data/` (downloads, database, run state), `reports/` (approved reports, and the draft awaiting a decision). `data/runs.sqlite` holds the audit log (the `audit_log` table: every tool call with inputs, outputs and timing, and every decision; read it with `--audit`) and the reports (the `reports` table).
+Created when you run it (not in the repo): `data/` (downloads, database, run state), `reports/` (approved reports). `data/runs.sqlite` holds the audit log (the `audit_log` table: every tool call with inputs, outputs and timing, and every decision; read it with `--audit`) and the reports (the `reports` table).
 
 ## Tests
 
@@ -276,19 +388,21 @@ Created when you run it (not in the repo): `data/` (downloads, database, run sta
 uv run pytest --cov
 ```
 
-72 tests, 99% line and branch coverage, about 40 seconds, and no model or network needed. They run against a small synthetic dataset built through the real ingest (registry, downloads and World Bank mocked): a Nigeria-style publication with item quantities and the traps the agent must handle (a bundle, a placeholder date, a test record, a duplicate, a multi-item contract), a Kenya-style one with award totals only, and a Rwanda-style one with prices per item. A scripted model stands in for Gemma, so the agent graph, the approval gate, the CLI, the bid packages and the eval runner all run for real; one integration test starts both MCP servers as subprocesses over stdio. The tests never touch `data/`, `reports/` or your database.
+102 tests, 99% line and branch coverage, about 30 seconds, and no model or network needed. They run against a small synthetic dataset built through the real ingest (registry, downloads and World Bank mocked): a Nigeria-style publication with item quantities and the traps the agent must handle (a bundle, a placeholder date, a test record, a duplicate, a multi-item contract), a Kenya-style one with award totals only, and a Rwanda-style one with prices per item. A scripted model stands in for Gemma, so the agent graph, the approval gate, the CLI, the bid packages and the eval runner all run for real; one integration test starts both MCP servers as subprocesses over stdio, and the web tests call the server over HTTP with access keys from two organisations. The tests never touch `data/`, `reports/` or your database.
 
 The tests prove the code does what it should. They do not measure how good the model's judgement is; that is what the evals are for (EVALS.md).
 
 ## Add a country
 
-Out of the box, FairPrice loads Nigeria and Kenya. Any country with data on the [OCP Data Registry](https://data.open-contracting.org/en/search/) can be added by its ISO country code:
+Nothing is loaded until you add a country. Any country with data on the [OCP Data Registry](https://data.open-contracting.org/en/search/) can be added by its ISO country code (sample codes in step 5):
 
 ```bash
 uv run fairprice-ingest --list       # countries with data, and which are loaded
 uv run fairprice-ingest --add RW     # add Rwanda
-uv run fairprice --country RW --currency RWF "laptop" --unit-price 900000 --year 2025
+uv run fairprice --country RW "laptop" --unit-price 900000 --year 2025
 ```
+
+Prices are taken to be in the country's own currency (RWF for Rwanda, read from its published data). If a quote is in another currency, say so with `--currency`, for example `--currency USD`; past prices are then converted at the World Bank's exchange rates.
 
 The same two actions are MCP tools on our server, `list_countries` and `add_country`, so an AI app can add a country. `add_country` runs in the background, because a large country takes minutes; `list_countries` shows its progress.
 
@@ -302,18 +416,40 @@ Whether a country can give prices per item depends on what it publishes. FairPri
 | A quantity for each contract item | Nigeria | Prices per item for single-item contracts (contract value ÷ quantity) |
 | Award totals, no quantities | Kenya | Searches only; every price check ends in "No comparison possible" |
 
+**So a Kenyan bid package can be read and checked today, but not benchmarked against Kenyan past prices.** The bid file checks work on any package. Kenya's published awards carry no quantities, so they give no price per item. Until they do, a Kenyan package's prices can be compared with another loaded country's past awards (`--country NG --currency KES`, converted at World Bank exchange rates and adjusted for inflation), which is evidence of a different market and should be read as such.
+
 ## Data and its limits
 
-- **Nigeria** (federal BPP and its states) and **Kenya** (PPRA and Makueni County) are loaded by default, and the evals use them. Other countries can be added as above.
-- **We built on the real-data half.** The price benchmarks come from real published awards. Portals publish awards, not bids, so the bid packages in the examples and evals are synthetic. FairPrice reads price schedules, not full bid documents (PDFs, certificates).
-- Data is used as published. The agent handles placeholder dates, lot prices, bundles and duplicates; it does not clean the source.
-- No live tenders and no personal data. Reports show buying agencies, not supplier names.
+- **We built on the real-data half.** The price benchmarks come from real published awards. Bid evaluation needs documents nobody publishes (bids, price schedules, tender files), so the bid packages in the examples and evals are synthetic and labelled as such. FairPrice reads price schedules, not full bid documents.
+- The evals use **Nigeria** (federal BPP and its states) and **Kenya** (PPRA and Makueni County). Any other country can be added as above.
+- No live tenders and no personal data. Reports show buying agencies, never supplier names.
+
+## Data quality: what the published data gets wrong, and what FairPrice does
+
+The data is used as published, never cleaned. Each problem is handled in code and, where it removes a record from a comparison, the report says why in plain words. Counts are from the loaded Nigerian (19,440 records, 13,848 with a price per item) and Kenyan (109,965 records) data.
+
+| Problem | How often | What FairPrice does |
+|---|---|---|
+| **Extreme values** (named in the brief) | A Nigerian warehouse published at **₦1,004,166,666,735** (₦1 trillion); a Kenyan school road at **KES 160.6 billion**; 6 values above 100 billion. | In each price range, a record more than **10 times** above or below the median of the others is left out: "an extreme value: 99× the median of the other comparable records (a typing error, or a total entered as a price per item)". The range is built on the median and quartiles, which one bad value cannot move. |
+| **Values of zero or below** | 301 Nigerian, 1,154 Kenyan | Flagged as an entry error and never used. |
+| **A price per item below 1** | 4 Nigerian | Flagged as an entry error and never used. |
+| **Supplier identifiers that break their own scheme** (named in the brief) | Of 30,038 Nigerian suppliers on awards, 2,488 have the identifier `NG-BPP-` with nothing after the scheme prefix, 811 have none, and 11,115 do not follow the scheme at all. Kenya's 80,671 are bare numbers with no scheme. | **Not used, by design.** No comparison, duplicate check or report depends on a supplier identifier, and reports never name suppliers, so a broken identifier cannot produce a wrong finding about a company. Duplicates are found by buyer, description and price instead. |
+| **Missing buyer names** (named in the brief) | 10,905 Nigerian releases leave `buyer.name` empty | The ingest takes the name from the procuring entity or the record's parties when `buyer.name` is empty; 9 priced records still have none and show "(buyer not published)". Nothing else depends on the name. |
+| Missing quantities | All Kenyan awards (108,811); 1,487 Nigerian | No price per item is computed, never estimated. Kenya can be searched but gives "No comparison possible". Tested by `kenya-no-quantities`. |
+| Missing or placeholder dates (NOCOPO uses 2001-01-01) | 2,045 Nigerian, 14,918 Kenyan | Flagged and left out: prices cannot be adjusted for inflation without a year. Tested by `placeholder-dates`. |
+| Test entries published as real awards | 180 Nigerian, from buyer "TEST MINISTRY - NOCOPO" | Flagged and left out. Found when one appeared in a laptop price range. |
+| Duplicates (same buyer, description and price) | 914 Nigerian | Only the first is used. |
+| Contracts for several different items | 3,835 Nigerian | No price per item can be assigned to one item, so they are left out. |
+| Bundles and lot prices ("2 Hilux and 1 Prado") | Common; not countable by code | The Analyst rejects them with a reason, and the Challenger looks for the ones it missed. The one failure we still see (EVALS.md). |
+| Prices from different years and currencies | Nigerian consumer prices rose more than 5× between 2015 and 2025 | Every price is adjusted with World Bank inflation and exchange rates to the year and currency under review. |
+
+Every exclusion is listed in the report's Sources sheet with its reason, so a committee member can check what was left out and why.
 
 ## Honest status
 
 - Works end to end on real data with Gemma 4 run locally (default), and with Qwen3 8B.
 - Small open models still make mistakes, such as searching with keywords that are too broad. The self-check catches some of these; EVALS.md shows what remains.
-- Nigeria and Kenya are loaded by default. Others can be added with `fairprice-ingest --add`; Rwanda has been tested this way, but the evals cover Nigeria and Kenya only.
+- Countries are loaded by code (`fairprice-ingest --add NG`). Rwanda has also been tested, but the evals cover Nigeria and Kenya only.
 - Item matching uses keywords, not a product classification. This is the biggest limit on accuracy, and long BoQ descriptions make it worse.
 - Tested on macOS only.
 
@@ -325,7 +461,7 @@ Not built. Each would be measured against the eval cases before replacing anythi
 
 **A code rule for bundles.** Reject records whose description names another model of the same brand (a Hilux search that finds "Land Cruiser" or "Prado"). That is precise where embeddings are fuzzy, and it targets the failure in EVALS.md that we have not fixed.
 
-**Reading bid files in any layout.** See "Designed, not built yet" under "Review a whole bid package".
+**Reading bid files in any layout.** See "Designed, not built yet" under "Review a whole tender".
 
 ## Licence
 
