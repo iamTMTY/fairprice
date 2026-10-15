@@ -107,7 +107,7 @@ The brief says the data will not be cleaned for us, and that handling it is most
 
 ## Models
 
-The default is **Gemma 4** (open weights, 8B) through Ollama, run locally with thinking mode off and a 4,096-token output cap. We started with Qwen3 8B, as planned, but switched after the evals. On the same code, Gemma 4 passed 17 of 18 single-item runs at about 2 minutes each. Qwen3 8B passed 12 of 18, kept letting bundles into the band, and averaged 6 minutes per run. On the latest code (round 7), Gemma 4 passes 16 of 18 single-item runs and 2 of 2 bid-package runs; the two failures kept a Prado-and-Hilux bundle in the band with the right verdict (EVALS.md). With thinking on, at temperature 0, Qwen3 once looped for over an hour before its first tool call. Any model that `langchain.init_chat_model` supports can be swapped in with `FAIRPRICE_MODEL`.
+The default is **Gemma 4 8B** (open weights) through Ollama, run locally with thinking mode off and a 4,096-token output cap. We started with Qwen3 8B, as planned, but switched after the evals. On the same code, Gemma 4 passed 17 of 18 single-item runs at about 2 minutes each. Qwen3 8B passed 12 of 18, kept letting bundles into the band, and averaged 6 minutes per run. On the latest code (round 7), Gemma 4 passes 16 of 18 single-item runs and 2 of 2 bid-package runs; the two failures kept a Prado-and-Hilux bundle in the band with the right verdict (EVALS.md). With thinking on, at temperature 0, Qwen3 once looped for over an hour before its first tool call. Any model that `langchain.init_chat_model` supports can be swapped in with `FAIRPRICE_MODEL`.
 
 ## Audit
 

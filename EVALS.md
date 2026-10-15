@@ -26,9 +26,9 @@ Expected answers come from bands we built by hand from records we read one by on
 
 ## Results
 
-2 runs per task, on a MacBook (Apple M5, 16 GB), models run locally through Ollama. Round 10 is the latest code (`20261013-0941-ollama_gemma4.jsonl`): reviews are runs, the Analyst plans its searches first, and a search matches its words in any order. Round 9 (`20261013-0839-ollama_gemma4.jsonl`) is the same design before one fix (below). Round 7 (`20261012-1238-ollama_gemma4.jsonl`) is the last round before runs. Qwen3 8B ran on round 3 code (`20261010-1321-ollama_qwen3_8b.jsonl`); we have not rerun it since.
+2 runs per task, on a MacBook (Apple M5, 16 GB), Gemma 4 8B and Qwen3 8B run locally through Ollama. Round 10 is the latest code (`20261013-0941-ollama_gemma4.jsonl`): reviews are runs, the Analyst plans its searches first, and a search matches its words in any order. Round 9 (`20261013-0839-ollama_gemma4.jsonl`) is the same design before one fix (below). Round 7 (`20261012-1238-ollama_gemma4.jsonl`) is the last round before runs. Qwen3 8B ran on round 3 code (`20261010-1321-ollama_qwen3_8b.jsonl`); we have not rerun it since.
 
-| Task | Gemma 4, round 10 (latest) | Gemma 4, round 9 | Gemma 4, round 7 | Qwen3 8B, round 3 |
+| Task | Gemma 4 8B, round 10 (latest) | Gemma 4 8B, round 9 | Gemma 4 8B, round 7 | Qwen3 8B, round 3 |
 |---|---|---|---|---|
 | hilux-within | **2/2** | 2/2 | 0/2 (right verdict, one bundle in the band) | 0/2 |
 | hilux-above | **0/2** (right verdict, two bundles in the band) | 0/2 (no band) | 2/2 | 0/2 |
@@ -60,42 +60,44 @@ Expected answers come from bands we built by hand from records we read one by on
 
 **About the timings:** the laptop was in use during rounds 6 and 7 (and the unit tests ran during round 6), so many runs were slower than usual. Round 5 (85 s per item, 401 s per package) shows timings on an idle machine.
 
-Qwen3 8B failed differently from Gemma 4: it reached the right verdict on every Hilux run, but let the Prado and Land Cruiser bundles into the band all four times, so the evidence behind the verdict was wrong. On motorcycles it kept only the one record that mentions "125cc". This is why the default model is now Gemma 4.
+## Three models on the same tasks
 
-## The same tasks on a hosted model: Gemma 4 31B on OpenRouter
+The same suite, 2 runs per task, on three open-weights models. Gemma 4 8B and Qwen3 8B ran on the laptop through Ollama; Gemma 4 31B ran on OpenRouter (`FAIRPRICE_MODEL=openai:google/gemma-4-31b-it`, `FAIRPRICE_MODEL_URL=https://openrouter.ai/api/v1`). Only published award data and the synthetic bid package were sent to the provider.
 
-The local model is the small Gemma 4 that fits on the laptop. To see how much of the remaining failure is the model rather than the design, we ran the same suite on the largest Gemma 4, `google/gemma-4-31b-it`, through OpenRouter (`FAIRPRICE_MODEL=openai:google/gemma-4-31b-it`, `FAIRPRICE_MODEL_URL=https://openrouter.ai/api/v1`). Same code, same tasks, 2 runs each. Only published award data and the synthetic bid package are sent to the provider.
-
-| Task | 31B, second round (latest code) | 31B, first round | Local Gemma 4, round 10 |
+| Task | Gemma 4 31B (OpenRouter) | Qwen3 8B (Ollama) | Gemma 4 8B (Ollama) |
 |---|---|---|---|
-| hilux-within | 2/2 | 2/2 | 2/2 |
-| hilux-above | **2/2** (no bundles in the band) | 2/2 | 0/2 (two bundles in the band) |
+| hilux-within | 2/2 | 0/2 (bundles in the band) | 2/2 |
+| hilux-above | **2/2** (no bundles in the band) | 0/2 (bundles in the band) | 0/2 (two bundles in the band) |
 | laptop-above | 2/2 | 2/2 | 2/2 |
 | laptop-within | 2/2 | 2/2 | 2/2 |
-| motorcycle-within | 1/2 | 2/2 | 0/2 |
+| motorcycle-within | 1/2 | 0/2 | 0/2 |
 | aircon-traps | 2/2 | 2/2 | 2/2 |
-| no-benchmark | 2/2 | 0/2 (an eval bug, below) | 2/2 |
-| kenya-no-quantities | 2/2 | 0/2 (an eval bug, below) | 2/2 |
+| no-benchmark | 2/2 | 2/2 | 2/2 |
+| kenya-no-quantities | 2/2 | 2/2 | 2/2 |
 | placeholder-dates | 2/2 | 2/2 | 2/2 |
-| **Single items** | **17/18** | 14/18 as scored (18/18 without the eval bug) | 14/18 |
-| bid-package | 1/2 (its motorcycle line) | 2/2 | 2/2 |
-| Average time per single item | 41 s | 40 s | 102 s |
-| Average time per bid package | 119 s | 114 s | 620 s |
-| Cost of a whole round (20 runs) | $0.18 | $0.17 | $0.00 (the same tokens on the hosted 26B: $0.08) |
+| **Single items** | **17/18** | 12/18 | 14/18 |
+| bid-package | 1/2 (its motorcycle line) | not run | 2/2 |
+| Average time per single item | 41 s | 359 s | 102 s |
+| Average time per bid package (3 lines) | 119 s | not run | 620 s |
+| Cost of a whole round (20 runs) | $0.18 | not recorded | $0.00 (the same tokens on hosted Gemma 4 26B: $0.08) |
+| Code version | 15 Oct 2026 | 10 Oct 2026 (round 3) | 13 Oct 2026 (round 10) |
+| Results file | `20261015-1041-openai_google_gemma-4-31b-it.jsonl` | `20261010-1321-ollama_qwen3_8b.jsonl` | `20261013-0941-ollama_gemma4.jsonl` |
 
-Results: `20261015-1041-openai_google_gemma-4-31b-it.jsonl` (second round) and `20261015-1002-openai_google_gemma-4-31b-it.jsonl` (first). Costs are worked out from each run's tokens at OpenRouter's prices of 15 October 2026 ($0.20 per million input tokens, $0.40 per million output); the eval runner recorded $0 for these rounds because it priced runs as the default local model, which is fixed.
+**Read the Qwen3 8B column with care: it is not a like-for-like comparison.** It ran on round 3 code, before runs, search planning, word-order-free search and most of the fixes in the history below; it had no bid package task and recorded no tokens. Gemma 4 8B and Gemma 4 31B ran on code two days apart. A fair comparison of the 8B models needs both rerun on the current code.
 
-**What the larger model fixes.** Both failures the local model never shook: the Hilux band no longer keeps the Hilux-and-Prado convoy bundles ("Bundle of Hilux and Land Cruiser Prado" is now its own rejection reason), and motorcycles are mostly kept although they do not state "125cc". It is also 2.5 times faster per item and 5 times faster per bid package than the laptop.
+**What Gemma 4 31B fixes.** Both failures Gemma 4 8B never shook: the Hilux band no longer keeps the Hilux-and-Prado convoy bundles ("Bundle of Hilux and Land Cruiser Prado" is now its own rejection reason), and motorcycles are mostly kept although they do not state "125cc". It is 2.5 times faster per item and 5 times faster per bid package than Gemma 4 8B on the laptop.
 
-**What it found.** In the first round, for the MRI scanner and the Kenyan task, the 31B rejected every record its searches found, each with a reason, and sent the price check an empty list of comparable records. Our tool refused an empty list, so the right conclusion, "no benchmark exists", could not be recorded and the line ended `unresolved`. Both tasks accept `unresolved`, so those runs were right; they were scored as failures by a second bug, in the eval runner, which compared unresolved lines as if they were price checks. Both bugs are fixed: the check now records "insufficient comparables: 0 accepted" with every rejection's reason, and the replay comparison only applies to price checks. The local model never hit this because it always kept a record or two.
+**What its first round found.** In an earlier Gemma 4 31B round (`20261015-1002-openai_google_gemma-4-31b-it.jsonl`), for the MRI scanner and the Kenyan task, it rejected every record its searches found, each with a reason, and sent the price check an empty list of comparable records. The tool refused an empty list, so "no benchmark exists" could not be recorded; and the eval runner scored those runs as failures by comparing unresolved lines as if they were price checks. Both are fixed: the check records "insufficient comparables: 0 accepted" with every rejection's reason. Gemma 4 8B never hit this because it always kept a record or two.
 
-**What still fails.** The motorcycle line, once in `motorcycle-within` and once in the bid package: the 31B kept 3 records, two short of a band. It is the same judgement as the local model's (rejecting records that do not state the engine size), less often.
+**What still fails on Gemma 4 31B.** The motorcycle line, once in `motorcycle-within` and once in the bid package: it kept 3 records, two short of a band. It is the same judgement as the 8B models' (rejecting records that do not state the engine size), less often.
 
-**What it would mean for a buyer.** About a cent per item and two to three cents per bid package, in exchange for sending published award data (never bid prices, in this eval) to a provider. With real bids, the bid prices go to the provider too, which a buyer's procurement and data rules must allow. The local model costs nothing and sends nothing, and is the default.
+**Qwen3 8B against Gemma 4 8B.** Qwen3 8B reached the right verdict on every Hilux run, but let the Prado and Land Cruiser bundles into the band all four times, so the evidence behind the verdict was wrong; on motorcycles it kept only the one record that mentions "125cc". It was also three times slower. This is why the default is Gemma 4 8B.
+
+**What Gemma 4 31B would mean for a buyer.** About a cent per item and two to three cents per bid package, in exchange for sending data to a provider; with real bids, the bid prices go to the provider too, which a buyer's procurement and data rules must allow. Gemma 4 8B on the buyer's own machine costs nothing and sends nothing, and is the default.
 
 ## Cost per run (measured)
 
-Every run records what it cost (model calls, tokens, model time, and API fees when prices are set); `uv run fairprice --audit <run id>` shows it, and so does the report's JSON. Measured in round 10 (`20261013-0941-ollama_gemma4.jsonl`, average of 2 runs per task, Gemma 4 on Ollama, MacBook Apple M5 16 GB):
+Every run records what it cost (model calls, tokens, model time, and API fees when prices are set); `uv run fairprice --audit <run id>` shows it, and so does the report's JSON. Measured in round 10 (`20261013-0941-ollama_gemma4.jsonl`, average of 2 runs per task, Gemma 4 8B on Ollama, MacBook Apple M5 16 GB):
 
 | Task | Model calls | Input tokens | Output tokens | Model time | Whole run |
 |---|---|---|---|---|---|
@@ -120,16 +122,16 @@ Each round fixed what the previous one exposed. We kept the failing rounds, beca
 | Round | Result | What failed | What we changed next |
 |---|---|---|---|
 | 0 | Qwen3 8B, Hilux only: 0/5 (two partial rounds) | With thinking on, at temperature 0, Qwen3 looped for 57 minutes before its first tool call. With thinking off, it searched, never re-checked, and gave up. A "search more broadly" nudge then made it search "pickup" instead of "hilux" and accept TATA pickups and 1,000 tricycles. The Challenger's SQL kept failing on a column it imagined ("adjusted"). | Thinking off, 4,096-token cap. A code self-check sends the Analyst back if it searched without re-checking. Code merges every record the model kept across all its checks. The nudge says keep the brand or model. The Challenger's prompt says adjusted prices are not stored, and to remove different products and bundles first. |
-| 1 | Gemma 4: 14/18 | Both "above band" tasks. The Challenger over-corrected: it removed records for a large quantity, for being a single unit, or for being an outlier. On laptops it removed all 19. | The Challenger may remove only a different product, a bundle or a lot price, never a record because of its price, quantity or a short description. |
-| 2 | Gemma 4: 13/18 | `hilux-above`: one narrow search left 7 records, and the Challenger then invented a reason ("from Kenya") to remove 4 of them. `motorcycle-within`: the Analyst rejected every motorcycle that did not state "125cc". | A band from one search with fewer than 10 records triggers a broader search. The Challenger's removals apply only if at least 5 records remain; otherwise its objections are shown to the committee. A missing spec is not a mismatch. |
-| 3 | Gemma 4: 17/18 | One `hilux-within` run (below). | Not fixed in code. Added the bid package task and the model-free bid file check. |
-| 4 | Gemma 4: 15/18 single items, bid package 0/2 | The package's motorcycle line failed in both runs. Told to keep "the most distinctive word", the Analyst chose "125cc" and searched it alone, and then kept only the one record that says "125cc". One `motorcycle-within` run crashed: `uvx` checked PyPI to start the borrowed server, and a brief network outage failed the DNS lookup. | The nudge now says to keep the word that names the product, never a specification such as "125cc". The borrowed server starts with `--offline` once it is cached. |
-| 5 | Gemma 4: 17/18 single items, bid package 2/2 | One `motorcycle-within` run let an "empowerment" bundle into the band (below). | Not fixed. Added every Nigerian state publication to the data, and excluded the portal's test records. |
-| 6 | Gemma 4: 14/18 single items, bid package 0/2 | Every Hilux run. The self-check's "broader search (just the brand or model name)" led Gemma to search "Toyota" (wrong verdict); separately, Gemma kept Hilux-and-Prado bundles (right verdict, wrong evidence). | The broader-search message now names the model ("hilux"), never the brand or a specification. |
-| 7 | Gemma 4: 16/18 single items, bid package 2/2 | Both `hilux-within` runs kept one Prado-and-Hilux bundle; the verdicts were right. | Not fixed (below). After this round, one line was added to `find_comparables`'s description ("limit: … at most 50"). |
-| 8 (1 run per task, to measure cost) | **Gemma 4: 5/9 single items, bid package 0/1** | Both Hilux runs and the package's Hilux line: Gemma searched whole phrases as one keyword ("Toyota Hilux double cabin"); the search matches each keyword as an exact piece of text, so every search found nothing and the runs ended `unresolved`. In round 7 its first search happened to split the phrase. The changed tool description is the most likely trigger: a small model at temperature 0 takes a different path after a one-line change. `motorcycle-within` and `aircon-traps` kept bundle and servicing records (the known failure below). | Make the search match each keyword's words in any order, so it no longer depends on how the model groups words; record a search plan and recover from empty searches. |
-| 9 | Gemma 4: 14/18 single items, bid package 2/2, model-free checks 21/21 | Runs, `plan_searches` and the word-order search fixed round 8: every Hilux search found records, and `hilux-within` passed both runs. `hilux-above` (both runs): Gemma's list of about 40 Hilux records included one mistyped id (128011, a cleaning-services contract, next to 128019); the new run check refused the whole call, Gemma resent the same list, and the run ended `unresolved` with no band. `motorcycle-within` (both runs): the broad "motorcycle" search showed 25 of 88 matches, and Gemma rejected most as "not specific enough on engine size" (the round 2 failure), leaving 4 records. (`20261013-0839-ollama_gemma4.jsonl`) | The check now leaves out ids the run's searches did not return and names them (`left_out`), instead of refusing the whole call; the band still uses only searched records. The motorcycle failure is not fixed (below). |
-| 10 (latest) | **Gemma 4: 14/18 single items, bid package 2/2, model-free checks 22/22** | `hilux-above` now gets a band and the right verdict, but kept two Hilux-and-Prado convoy bundles. `motorcycle-within` unchanged from round 9. (`20261013-0941-ollama_gemma4.jsonl`) | Not fixed (below). |
+| 1 | Gemma 4 8B: 14/18 | Both "above band" tasks. The Challenger over-corrected: it removed records for a large quantity, for being a single unit, or for being an outlier. On laptops it removed all 19. | The Challenger may remove only a different product, a bundle or a lot price, never a record because of its price, quantity or a short description. |
+| 2 | Gemma 4 8B: 13/18 | `hilux-above`: one narrow search left 7 records, and the Challenger then invented a reason ("from Kenya") to remove 4 of them. `motorcycle-within`: the Analyst rejected every motorcycle that did not state "125cc". | A band from one search with fewer than 10 records triggers a broader search. The Challenger's removals apply only if at least 5 records remain; otherwise its objections are shown to the committee. A missing spec is not a mismatch. |
+| 3 | Gemma 4 8B: 17/18 | One `hilux-within` run (below). | Not fixed in code. Added the bid package task and the model-free bid file check. |
+| 4 | Gemma 4 8B: 15/18 single items, bid package 0/2 | The package's motorcycle line failed in both runs. Told to keep "the most distinctive word", the Analyst chose "125cc" and searched it alone, and then kept only the one record that says "125cc". One `motorcycle-within` run crashed: `uvx` checked PyPI to start the borrowed server, and a brief network outage failed the DNS lookup. | The nudge now says to keep the word that names the product, never a specification such as "125cc". The borrowed server starts with `--offline` once it is cached. |
+| 5 | Gemma 4 8B: 17/18 single items, bid package 2/2 | One `motorcycle-within` run let an "empowerment" bundle into the band (below). | Not fixed. Added every Nigerian state publication to the data, and excluded the portal's test records. |
+| 6 | Gemma 4 8B: 14/18 single items, bid package 0/2 | Every Hilux run. The self-check's "broader search (just the brand or model name)" led Gemma to search "Toyota" (wrong verdict); separately, Gemma kept Hilux-and-Prado bundles (right verdict, wrong evidence). | The broader-search message now names the model ("hilux"), never the brand or a specification. |
+| 7 | Gemma 4 8B: 16/18 single items, bid package 2/2 | Both `hilux-within` runs kept one Prado-and-Hilux bundle; the verdicts were right. | Not fixed (below). After this round, one line was added to `find_comparables`'s description ("limit: … at most 50"). |
+| 8 (1 run per task, to measure cost) | **Gemma 4 8B: 5/9 single items, bid package 0/1** | Both Hilux runs and the package's Hilux line: Gemma searched whole phrases as one keyword ("Toyota Hilux double cabin"); the search matches each keyword as an exact piece of text, so every search found nothing and the runs ended `unresolved`. In round 7 its first search happened to split the phrase. The changed tool description is the most likely trigger: a small model at temperature 0 takes a different path after a one-line change. `motorcycle-within` and `aircon-traps` kept bundle and servicing records (the known failure below). | Make the search match each keyword's words in any order, so it no longer depends on how the model groups words; record a search plan and recover from empty searches. |
+| 9 | Gemma 4 8B: 14/18 single items, bid package 2/2, model-free checks 21/21 | Runs, `plan_searches` and the word-order search fixed round 8: every Hilux search found records, and `hilux-within` passed both runs. `hilux-above` (both runs): Gemma's list of about 40 Hilux records included one mistyped id (128011, a cleaning-services contract, next to 128019); the new run check refused the whole call, Gemma resent the same list, and the run ended `unresolved` with no band. `motorcycle-within` (both runs): the broad "motorcycle" search showed 25 of 88 matches, and Gemma rejected most as "not specific enough on engine size" (the round 2 failure), leaving 4 records. (`20261013-0839-ollama_gemma4.jsonl`) | The check now leaves out ids the run's searches did not return and names them (`left_out`), instead of refusing the whole call; the band still uses only searched records. The motorcycle failure is not fixed (below). |
+| 10 (latest) | **Gemma 4 8B: 14/18 single items, bid package 2/2, model-free checks 22/22** | `hilux-above` now gets a band and the right verdict, but kept two Hilux-and-Prado convoy bundles. `motorcycle-within` unchanged from round 9. (`20261013-0941-ollama_gemma4.jsonl`) | Not fixed (below). |
 
 One more round was abandoned: the laptop slept mid-run, the connection to Ollama dropped, and the run hung with no timeout. It is kept as `20261010-0737-ollama_gemma4.jsonl` (1 run, failed). Every model call now has a 10-minute timeout, so a dropped connection fails one run instead of freezing the suite.
 
@@ -163,11 +165,11 @@ Measured, not hidden. Temperature is 0, but local inference is not perfectly det
 
 ## Tried and rejected: a fast decision model for choosing comparable records
 
-Most of a run's time goes on the Analyst deciding which past records describe the same item. "Decision models" such as TypeSafe AI's Jev claim to make that kind of choice up to 200 times faster than a chat model. Jev is a hosted service, so every record and quoted price would leave the machine, and we ruled it out. We tested an open-weights alternative, Deem-4B (`mertkayacs/deem-4b`, Apache-2.0, run through Ollama), against Gemma 4, before building anything on it.
+Most of a run's time goes on the Analyst deciding which past records describe the same item. "Decision models" such as TypeSafe AI's Jev claim to make that kind of choice up to 200 times faster than a chat model. Jev is a hosted service, so every record and quoted price would leave the machine, and we ruled it out. We tested an open-weights alternative, Deem-4B (`mertkayacs/deem-4b`, Apache-2.0, run through Ollama), against Gemma 4 8B, before building anything on it.
 
 **Test:** 88 records from our eval searches (Hilux, laptop, motorcycle, air conditioner, ProBook), including every trap record. We labelled each one by hand from its description as the same item, a bundle, a lot price, or a different item. Both models got the same question in Deem's own prompt format, one request per item for all its records. The script and raw answers are in `evals/classifier_experiment.py` and `evals/results/20261011-classifier-*.json`.
 
-| | Deem-4B | Gemma 4 |
+| | Deem-4B | Gemma 4 8B |
 |---|---|---|
 | Records labelled exactly right | 67 / 88 | 73 / 88 |
 | Right keep-or-drop decision | 70 / 88 | 77 / 88 |
@@ -182,6 +184,6 @@ Most of a run's time goes on the Analyst deciding which past records describe th
 
 **What we learned:**
 
-- Gemma 4, asked once to label all records from a search in one structured request, took about 13 seconds per item. The agent takes 85 to 120 seconds, mostly reasoning over the same records across several turns. A `classify_records` tool on our MCP server, using Gemma, is our best lead for speed. It is not built, because we would have to rerun every eval to show it keeps accuracy.
+- Gemma 4 8B, asked once to label all records from a search in one structured request, took about 13 seconds per item. The agent takes 85 to 120 seconds, mostly reasoning over the same records across several turns. A `classify_records` tool on our MCP server, using Gemma, is our best lead for speed. It is not built, because we would have to rerun every eval to show it keeps accuracy.
 - Both models kept the "lot price" records, where the quantity is 1 but the description says many units ("Supply of 87 laptop computers"). A code rule may catch those better than either model.
 - Small test, labelled by us: 88 records from 5 items.
