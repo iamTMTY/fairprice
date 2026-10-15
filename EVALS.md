@@ -56,7 +56,25 @@ Expected answers come from bands we built by hand from records we read one by on
 
 Qwen3 8B failed differently from Gemma 4: it reached the right verdict on every Hilux run, but let the Prado and Land Cruiser bundles into the band all four times, so the evidence behind the verdict was wrong. On motorcycles it kept only the one record that mentions "125cc". This is why the default model is now Gemma 4.
 
-**Cost per run:** no API fees, and no data leaves the machine. About 1.5 to 2 minutes of laptop compute per distinct item with Gemma 4; a bid package costs the same per line however many bidders it has.
+## Cost per run (measured)
+
+Every run records what it cost (model calls, tokens, model time, and API fees when prices are set); `uv run fairprice --audit <run id>` shows it, and so does the report's JSON. Measured in round 8 (`20261013-0710-ollama_gemma4.jsonl`, one run per task, Gemma 4 on Ollama, MacBook Apple M5 16 GB):
+
+| Task | Model calls | Input tokens | Output tokens | Model time |
+|---|---|---|---|---|
+| hilux-within | 7 | 7,022 | 540 | 21 s |
+| hilux-above | 7 | 7,031 | 544 | 17 s |
+| laptop-above | 7 | 23,014 | 966 | 42 s |
+| laptop-within | 8 | 29,200 | 2,314 | 97 s |
+| motorcycle-within | 8 | 34,476 | 2,014 | 114 s |
+| aircon-traps | 8 | 37,318 | 2,458 | 137 s |
+| no-benchmark | 6 | 7,669 | 513 | 25 s |
+| kenya-no-quantities | 8 | 37,627 | 628 | 49 s |
+| placeholder-dates | 12 | 50,928 | 1,358 | 129 s |
+| **Single item, median** | **8** | **29,200** | **966** | **49 s** |
+| bid-package (3 lines, 3 bidders) | 21 | 84,212 | 4,191 | 304 s |
+
+**API fees: none.** The model runs on the laptop and no data leaves it. Input tokens dominate: each model call re-reads the conversation so far, including search results. A bid package costs about one single-item run per distinct line, however many bidders it has. The two Hilux runs were cheap because they failed early (see round 8 below), so a typical Hilux run costs more.
 
 ## How we got here
 
@@ -71,7 +89,8 @@ Each round fixed what the previous one exposed. We kept the failing rounds, beca
 | 4 | Gemma 4: 15/18 single items, bid package 0/2 | The package's motorcycle line failed in both runs. Told to keep "the most distinctive word", the Analyst chose "125cc" and searched it alone, and then kept only the one record that says "125cc". One `motorcycle-within` run crashed: `uvx` checked PyPI to start the borrowed server, and a brief network outage failed the DNS lookup. | The nudge now says to keep the word that names the product, never a specification such as "125cc". The borrowed server starts with `--offline` once it is cached. |
 | 5 | Gemma 4: 17/18 single items, bid package 2/2 | One `motorcycle-within` run let an "empowerment" bundle into the band (below). | Not fixed. Added every Nigerian state publication to the data, and excluded the portal's test records. |
 | 6 | Gemma 4: 14/18 single items, bid package 0/2 | Every Hilux run. The self-check's "broader search (just the brand or model name)" led Gemma to search "Toyota" (wrong verdict); separately, Gemma kept Hilux-and-Prado bundles (right verdict, wrong evidence). | The broader-search message now names the model ("hilux"), never the brand or a specification. |
-| 7 (latest) | **Gemma 4: 16/18 single items, bid package 2/2** | Both `hilux-within` runs kept one Prado-and-Hilux bundle; the verdicts were right. | Not fixed (below). |
+| 7 | Gemma 4: 16/18 single items, bid package 2/2 | Both `hilux-within` runs kept one Prado-and-Hilux bundle; the verdicts were right. | Not fixed (below). After this round, one line was added to `find_comparables`'s description ("limit: … at most 50"). |
+| 8 (latest, 1 run per task, to measure cost) | **Gemma 4: 5/9 single items, bid package 0/1** | Both Hilux runs and the package's Hilux line: Gemma searched whole phrases as one keyword ("Toyota Hilux double cabin"); the search matches each keyword as an exact piece of text, so every search found nothing and the runs ended `unresolved`. In round 7 its first search happened to split the phrase. The changed tool description is the most likely trigger: a small model at temperature 0 takes a different path after a one-line change. `motorcycle-within` and `aircon-traps` kept bundle and servicing records (the known failure below). | Make the search match each keyword's words in any order, so it no longer depends on how the model groups words; record a search plan and recover from empty searches. |
 
 One more round was abandoned: the laptop slept mid-run, the connection to Ollama dropped, and the run hung with no timeout. It is kept as `20261010-0737-ollama_gemma4.jsonl` (1 run, failed). Every model call now has a 10-minute timeout, so a dropped connection fails one run instead of freezing the suite.
 

@@ -14,12 +14,15 @@ import re
 import subprocess
 import sys
 import time
+import urllib.request
 import uuid
 from pathlib import Path
 from typing import TypedDict
 
+import duckdb
 from langchain.agents import create_agent
 from langchain.chat_models import init_chat_model
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -432,6 +435,99 @@ def ask_decision():
     return decision
 
 
+def ollama_url():
+    """Where Ollama runs: OLLAMA_HOST, the setting Ollama itself uses (e.g. http://gpu-server:11434)."""
+    url = os.environ.get("OLLAMA_HOST", "http://localhost:11434").strip().rstrip("/")
+    return url if "://" in url else f"http://{url}"
+
+
+def check_model(model_name=MODEL):
+    """What would stop a run, each with how to fix it; empty when the model is ready."""
+    if not model_name.startswith("ollama:"):
+        return []  # other providers report their own errors
+    name, url = model_name.removeprefix("ollama:"), ollama_url()
+    try:
+        with urllib.request.urlopen(f"{url}/api/tags", timeout=5) as r:
+            have = {m["name"] for m in json.load(r).get("models", [])}
+    except (OSError, ValueError) as e:
+        return [f"Ollama is not reachable at {url} ({e}). Install it from https://ollama.com/download and open it, "
+                "or set OLLAMA_HOST to where it runs, e.g. OLLAMA_HOST=http://gpu-server:11434."]
+    if name not in have and f"{name}:latest" not in have:
+        where = "" if any(h in url for h in ("localhost", "127.0.0.1")) else " on the machine running Ollama"
+        return [f"Ollama at {url} does not have the model {name!r}. Run `ollama pull {name}`{where}."]
+    return []
+
+
+def check_setup():
+    """`fairprice --check`: everything a run needs, with how to fix what is missing."""
+    failures = 0
+
+    def show(good, text, fix=""):
+        nonlocal failures
+        failures += good is False
+        print(f"{'✓' if good else '✗' if good is False else '•'} {text}" + (f"\n    {fix}" if fix else ""))
+
+    problems = check_model(MODEL)
+    show(not problems, f"Model {MODEL} at {ollama_url()}" if MODEL.startswith("ollama:") else f"Model {MODEL}",
+         problems[0] if problems else "")
+    if Path(DB).exists():
+        with duckdb.connect(DB, read_only=True) as con:
+            records, countries = con.execute("SELECT count(*), string_agg(DISTINCT country, ', ' ORDER BY country) FROM lines").fetchone()
+        show(True, f"Procurement data: {records:,} records ({countries})")
+    else:
+        show(None, "Procurement data: not built yet; the first run downloads about 60 MB, or run `uv run fairprice-ingest`")
+    cached = borrowed_args()[0] == "--offline"
+    show(True if cached else None, "Borrowed DuckDB MCP server: " + ("cached" if cached else "downloads on the first run (needs internet once)"))
+    try:
+        store = storage()
+        show(True, f"Reports: {type(store).__name__.replace('Storage', '').lower()} storage, "
+                   f"{os.environ.get('FAIRPRICE_REPORT_FORMAT', 'xlsx')} files")
+    except Exception as e:
+        show(False, f"Reports: {e!r}", "For FAIRPRICE_STORAGE=s3, run `uv sync --extra s3` and set FAIRPRICE_S3_BUCKET.")
+    try:
+        with engine().connect():
+            pass
+        show(True, "Database for runs, reports and the audit log: reachable")
+    except Exception as e:
+        show(False, f"Database for runs, reports and the audit log: {e!r}", "Check FAIRPRICE_SQL_URL.")
+    print("Ready." if not failures else f"{failures} problem(s) to fix before a run.")
+    return failures
+
+
+class Usage(BaseCallbackHandler):
+    """What a run cost: model calls, tokens, model time and, if prices are set, API fees."""
+
+    def __init__(self):
+        self.calls = self.input_tokens = self.output_tokens = 0
+        self.seconds, self.started = 0.0, {}
+
+    def on_chat_model_start(self, serialized, messages, *, run_id, **kwargs):
+        self.started[run_id] = time.perf_counter()
+
+    def on_llm_end(self, response, *, run_id, **kwargs):
+        self.calls += 1
+        self.seconds += time.perf_counter() - self.started.pop(run_id, time.perf_counter())
+        for generations in response.generations:
+            for g in generations:
+                usage = getattr(getattr(g, "message", None), "usage_metadata", None) or {}
+                self.input_tokens += usage.get("input_tokens", 0)
+                self.output_tokens += usage.get("output_tokens", 0)
+
+    def summary(self):
+        price_in = float(os.environ.get("FAIRPRICE_PRICE_PER_MILLION_INPUT_TOKENS", 0))
+        price_out = float(os.environ.get("FAIRPRICE_PRICE_PER_MILLION_OUTPUT_TOKENS", 0))
+        return {"model": MODEL, "model_calls": self.calls, "input_tokens": self.input_tokens,
+                "output_tokens": self.output_tokens, "model_seconds": round(self.seconds, 1),
+                "api_fees": round((self.input_tokens * price_in + self.output_tokens * price_out) / 1e6, 4),
+                "api_fees_currency": os.environ.get("FAIRPRICE_PRICE_CURRENCY", "USD")}
+
+    def line(self):
+        c = self.summary()
+        fees = f"{c['api_fees_currency']} {c['api_fees']:.2f}" + (" (local model)" if c["api_fees"] == 0 else "")
+        return (f"Cost of this run: {c['model_calls']} model call{'s' if c['model_calls'] != 1 else ''}, {c['input_tokens']:,} input and "
+                f"{c['output_tokens']:,} output tokens, {c['model_seconds']:.0f} s of model time, API fees {fees}.")
+
+
 @contextlib.asynccontextmanager
 async def session(model_name=MODEL):
     """Connect both MCP servers and the model; yield the compiled graph and our own tools by name."""
@@ -441,10 +537,12 @@ async def session(model_name=MODEL):
     client = MultiServerMCPClient(servers(), tool_interceptors=[audit_interceptor])
     own_tools = await client.get_tools(server_name="fairprice")
     borrowed_tools = await client.get_tools(server_name="duckdb")
+    if problems := check_model(model_name):
+        raise SystemExit("\n".join(problems))
     kwargs = {"temperature": 0}
     if model_name.startswith("ollama:"):
         # Thinking at temperature 0 can loop for an hour on Qwen3; cap output so a run always ends.
-        kwargs.update(num_ctx=16384, num_predict=4096, reasoning=False,
+        kwargs.update(num_ctx=16384, num_predict=4096, reasoning=False, base_url=ollama_url(),
                       client_kwargs={"timeout": 600})  # a dropped connection fails the run instead of hanging it
     model = init_chat_model(model_name, **kwargs)
     (ROOT / "data").mkdir(exist_ok=True)  # the database may be configured elsewhere; run state always lives here
@@ -455,7 +553,8 @@ async def session(model_name=MODEL):
 async def run(args):
     global CURRENT_RUN
     run_id = CURRENT_RUN = args.resume or uuid.uuid4().hex[:12]
-    config = {"configurable": {"thread_id": run_id}}
+    usage = Usage()
+    config = {"configurable": {"thread_id": run_id}, "callbacks": [usage]}
     async with session() as (graph, _):
         if args.resume:
             payload = None
@@ -475,8 +574,9 @@ async def run(args):
                 break
             req = snapshot.values["request"]
             draft = report.draft_name(req["item"], run_id)
-            save_draft(run_id, draft, report.build(req["item"], *report.single(snapshot.values), None, req, run_id, MODEL),
-                       snapshot.values["report"])
+            data = report.build(req["item"], *report.single(snapshot.values), None, req, run_id, MODEL)
+            data["report"]["cost"] = usage.summary()
+            save_draft(run_id, draft, data, snapshot.values["report"] + "\n\n" + usage.line())
             decision = ask_decision()
             if decision["action"] == "approve":  # the person at this menu is the approval write_price_review needs
                 decision["approval"] = grant("write_price_review", draft, decision["name"])
@@ -486,7 +586,7 @@ async def run(args):
             payload = Command(resume=decision)
         final = (await graph.aget_state(config)).values
         print(final.get("saved") or "Not saved: the reviewer rejected the draft.")
-        audit(run_id, event="run_finished", saved=final.get("saved"))
+        audit(run_id, event="run_finished", saved=final.get("saved"), cost=usage.summary())
 
 
 def main():
@@ -500,12 +600,15 @@ def main():
                    help="a bid package (.xlsx, .csv or .json) to review line by line; see README")
     p.add_argument("--resume", help="resume a paused run by its id (with --package: reuse that batch's finished lines)")
     p.add_argument("--audit", metavar="RUN_ID", help="print the audit log of a run or batch, then exit")
+    p.add_argument("--check", action="store_true", help="check the setup (model, data, storage) and say how to fix it")
     p.add_argument("--approve", metavar="REQUEST", nargs="?", const="",
                    help="decide a request from an AI app to approve a report or add a country (no id: list them)")
     p.add_argument("--format", choices=report.FORMATS, default=os.environ.get("FAIRPRICE_REPORT_FORMAT", "xlsx"),
                    help="report file format (default: FAIRPRICE_REPORT_FORMAT, or xlsx)")
     args = p.parse_args()
     os.environ["FAIRPRICE_REPORT_FORMAT"] = args.format
+    if args.check:
+        raise SystemExit(1 if check_setup() else 0)
     if args.audit:
         return show_audit(args.audit)
     if args.approve is not None:

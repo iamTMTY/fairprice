@@ -45,6 +45,7 @@ def test_run_cases_and_write_results(tmp_path, monkeypatch, capsys):
     assert "broken                 run 1: FAIL error" in out
     written = [json.loads(line) for line in next((tmp_path / "results").glob("*.jsonl")).read_text().splitlines()]
     assert [r["case"] for r in written] == ["hilux", "pkg", "broken"]
+    assert all({"model_calls", "input_tokens", "output_tokens"} <= set(r) for r in written)
 
 
 def test_a_crashing_case_is_a_failed_run_not_a_crash():

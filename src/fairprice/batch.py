@@ -241,7 +241,7 @@ def file_checks(boq, bidders):
     return found
 
 
-async def analyse(graph, lines, base, batch_id, feedback="", attempt=0, only=None):
+async def analyse(graph, lines, base, batch_id, feedback="", attempt=0, only=None, usage=None):
     """Run the agent (up to the draft, no gate) once per distinct item; return {line: state}."""
     states, by_item = {}, {}
     for n, entry in enumerate(lines):
@@ -254,7 +254,7 @@ async def analyse(graph, lines, base, batch_id, feedback="", attempt=0, only=Non
             states[entry["line"]] = by_item[key]
             continue
         thread = agent.CURRENT_RUN = f"{batch_id}-{n}" + (f"-r{attempt}" if attempt else "")
-        config = {"configurable": {"thread_id": thread}}
+        config = {"configurable": {"thread_id": thread}, "callbacks": [usage] if usage else []}
         req = {**base, "item": entry["item"], "unit_price": statistics.median(entry["prices"].values())}
         snapshot = await graph.aget_state(config)
         if snapshot.values.get("final") is not None:
@@ -288,12 +288,14 @@ async def run(args):
     agent.audit(batch_id, event="batch_started", sheet=str(args.sheet), bidders=names, lines=len(lines),
                 file_checks=checks, model=agent.MODEL)
     async with agent.session() as (graph, tools):
-        states = await analyse(graph, lines, base, batch_id)
+        usage = agent.Usage()
+        states = await analyse(graph, lines, base, batch_id, usage=usage)
         attempt = 0
         draft = report.draft_name(Path(args.sheet).stem, batch_id)
         while True:
-            agent.save_draft(batch_id, draft, report.build(Path(args.sheet).name, lines, states, names, checks, base,
-                                                              batch_id, agent.MODEL), report.summary(lines, states, names, checks, base))
+            data = report.build(Path(args.sheet).name, lines, states, names, checks, base, batch_id, agent.MODEL)
+            data["report"]["cost"] = usage.summary()
+            agent.save_draft(batch_id, draft, data, report.summary(lines, states, names, checks, base) + "\n\n" + usage.line())
             decision = agent.ask_decision()
             if decision["action"] == "revise":
                 redo = input("Which line numbers? (comma-separated, blank for all): ").replace(" ", "")
@@ -306,10 +308,10 @@ async def run(args):
             if decision["action"] != "revise":
                 break
             attempt += 1
-            states |= await analyse(graph, lines, base, batch_id, decision["feedback"], attempt, decision["lines"])
+            states |= await analyse(graph, lines, base, batch_id, decision["feedback"], attempt, decision["lines"], usage)
         saved = None
         if decision["action"] == "approve":
             result = await tools["write_price_review"].ainvoke({"report": draft, "approval": decision["approval"]})
             saved = agent.tool_text(result)
         print(saved or "Not saved: the reviewer rejected the draft.")
-        agent.audit(batch_id, event="batch_finished", saved=saved)
+        agent.audit(batch_id, event="batch_finished", saved=saved, cost=usage.summary())

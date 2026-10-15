@@ -188,12 +188,14 @@ def test_main_parses_the_command_line(monkeypatch, capsys):
 def test_session_starts_both_mcp_servers_and_builds_the_database_when_missing(monkeypatch, tmp_path, answers, capsys):
     """Integration: the real session, with both MCP servers as subprocesses over stdio; only the model is scripted."""
     monkeypatch.setattr(agent, "init_chat_model", lambda name, **kw: ScriptedModel(keywords={REQ["item"]: ["hilux"]}))
+    monkeypatch.setattr(agent, "check_model", lambda name: [])  # no Ollama in CI
     monkeypatch.setattr(agent, "ROOT", tmp_path)  # the checkpointer's file
     monkeypatch.setattr(agent, "DB", agent.DB)
     answers(["approve", "Ada Obi"])
     asyncio.run(agent.run(argparse.Namespace(resume=None, **REQ)))
     out = capsys.readouterr().out
     assert "-> fairprice.find_comparables" in out and "-> duckdb.execute_query" in out and '"saved"' in out
+    assert "Cost of this run: " in out and "API fees USD 0.00 (local model)" in out
     built = []
     monkeypatch.setattr(agent, "DB", str(tmp_path / "missing.duckdb"))
     monkeypatch.setattr(agent.ingest, "main", lambda argv: built.append(argv))
@@ -249,3 +251,71 @@ def test_main_routes_approve(monkeypatch):
         monkeypatch.setattr("sys.argv", argv)
         agent.main()
         assert seen[-1] == expected
+
+
+def test_ollama_url_and_model_checks(monkeypatch):
+    monkeypatch.setenv("OLLAMA_HOST", "gpu-server:11434")
+    assert agent.ollama_url() == "http://gpu-server:11434"
+    monkeypatch.setenv("OLLAMA_HOST", "https://ollama.example.org/")
+    assert agent.ollama_url() == "https://ollama.example.org"
+    assert agent.check_model("openai:gpt-x") == []  # other providers report their own errors
+
+    class Reply:
+        def __init__(self, body):
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, *a):
+            return self.body
+    monkeypatch.setattr(agent.urllib.request, "urlopen", lambda url, timeout: Reply(b'{"models": [{"name": "gemma4:latest"}]}'))
+    assert agent.check_model("ollama:gemma4") == []
+    assert "Run `ollama pull qwen3:8b` on the machine running Ollama" in agent.check_model("ollama:qwen3:8b")[0]
+
+    def refused(url, timeout):
+        raise OSError("connection refused")
+    monkeypatch.setattr(agent.urllib.request, "urlopen", refused)
+    assert "is not reachable at https://ollama.example.org" in agent.check_model("ollama:gemma4")[0]
+    with pytest.raises(SystemExit, match="not reachable"):
+        asyncio.run(agent.session("ollama:gemma4").__aenter__())
+
+
+def test_check_setup_reports_each_part(monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(agent, "check_model", lambda name: [])
+    monkeypatch.setattr(agent, "borrowed_args", lambda: ["--offline"])
+    assert agent.check_setup() == 0
+    out = capsys.readouterr().out
+    assert "✓ Procurement data:" in out and "✓ Borrowed DuckDB MCP server: cached" in out and "Ready." in out
+    monkeypatch.setattr(agent, "check_model", lambda name: ["Ollama is not reachable"])
+    monkeypatch.setattr(agent, "borrowed_args", lambda: [agent.BORROWED])
+    monkeypatch.setattr(agent, "DB", str(tmp_path / "none.duckdb"))
+    monkeypatch.setenv("FAIRPRICE_STORAGE", "s3")
+    monkeypatch.delenv("FAIRPRICE_S3_BUCKET", raising=False)
+    monkeypatch.setattr(agent, "engine", lambda: (_ for _ in ()).throw(RuntimeError("no database")))
+    assert agent.check_setup() == 3
+    out = capsys.readouterr().out
+    assert "✗ Model" in out and "• Procurement data: not built yet" in out and "downloads on the first run" in out
+    assert "uv sync --extra s3" in out and "Check FAIRPRICE_SQL_URL" in out and "3 problem(s)" in out
+    monkeypatch.setattr("sys.argv", ["fairprice", "--check"])
+    with pytest.raises(SystemExit) as code:
+        agent.main()
+    assert code.value.code == 1
+
+
+def test_usage_counts_calls_tokens_time_and_fees(monkeypatch):
+    usage = agent.Usage()
+    message = SimpleNamespace(usage_metadata={"input_tokens": 1500, "output_tokens": 200})
+    for run in ("a", "b"):
+        usage.on_chat_model_start({}, [], run_id=run)
+        usage.on_llm_end(SimpleNamespace(generations=[[SimpleNamespace(message=message)]]), run_id=run)
+    usage.on_llm_end(SimpleNamespace(generations=[[SimpleNamespace(message=None)]]), run_id="never-started")
+    c = usage.summary()
+    assert (c["model_calls"], c["input_tokens"], c["output_tokens"]) == (3, 3000, 400)
+    monkeypatch.setenv("FAIRPRICE_PRICE_PER_MILLION_INPUT_TOKENS", "2")
+    monkeypatch.setenv("FAIRPRICE_PRICE_PER_MILLION_OUTPUT_TOKENS", "10")
+    assert usage.summary()["api_fees"] == 0.01
+    assert "3 model calls, 3,000 input and 400 output tokens" in usage.line() and "USD 0.01." in usage.line()

@@ -47,16 +47,22 @@ def judge(case, state):
             "passed": not failures}
 
 
+def cost(usage):
+    c = usage.summary()
+    return {k: c[k] for k in ("model_calls", "input_tokens", "output_tokens", "model_seconds")}
+
+
 async def run_package(graph, case, model):
     """A whole bid package: per-bidder assessments from the shared bands, and nothing saved or ranked."""
     batch_id = f"eval-{case['id']}-{uuid.uuid4().hex[:6]}"
+    usage = agent.Usage()
     base = {"currency": "NGN", "year": case["year"], "country": "NG"}
     agent.audit(batch_id, event="batch_started", sheet=case["package"], model=model)
     start = time.perf_counter()
     try:  # everything, including reading the package: one bad case must not stop the suite
         boq, bidders = batch.read_package(ROOT / case["package"])
         lines = batch.package_lines(boq, bidders)
-        states = await batch.analyse(graph, lines, base, batch_id)
+        states = await batch.analyse(graph, lines, base, batch_id, usage=usage)
         got = {f"{line}/{b}": c["status"] for (line, b), c in report.cells(lines, states, list(bidders)).items()}
         data = report.build(case["package"], lines, states, list(bidders), batch.file_checks(boq, bidders), base, batch_id)
         table = [{**data["prices"][0], **report.headings(data)[0][0]}]  # field names and spreadsheet headings
@@ -68,14 +74,16 @@ async def run_package(graph, case, model):
     except Exception as e:
         result = {"assessment": "error", "n": 0, "median": None, "challenge": None,
                   "failures": [repr(e)[:300]], "passed": False}
-    return {"case": case["id"], "run_id": batch_id, "seconds": round(time.perf_counter() - start, 1), **result}
+    return {"case": case["id"], "run_id": batch_id, "seconds": round(time.perf_counter() - start, 1), **result,
+            **cost(usage)}
 
 
 async def run_case(graph, case, model):
     if "package" in case:
         return await run_package(graph, case, model)
     run_id = agent.CURRENT_RUN = f"eval-{case['id']}-{uuid.uuid4().hex[:6]}"
-    config = {"configurable": {"thread_id": run_id}}
+    usage = agent.Usage()
+    config = {"configurable": {"thread_id": run_id}, "callbacks": [usage]}
     req = {"item": case["item"], "unit_price": case["unit_price"], "year": case["year"],
            "currency": case.get("currency", "NGN"), "country": case.get("country", "NG")}
     agent.audit(run_id, event="run_started", request=req, model=model)
@@ -88,7 +96,8 @@ async def run_case(graph, case, model):
     except Exception as e:  # a crash is a failed run, not a reason to stop the suite
         result = {"assessment": "error", "n": 0, "median": None, "challenge": None,
                   "failures": [repr(e)[:300]], "passed": False}
-    return {"case": case["id"], "run_id": run_id, "seconds": round(time.perf_counter() - start, 1), **result}
+    return {"case": case["id"], "run_id": run_id, "seconds": round(time.perf_counter() - start, 1), **result,
+            **cost(usage)}
 
 
 def fake_report(record_ids):
@@ -231,7 +240,9 @@ async def main_async(args):
         medians = [r["median"] for r in rs if r["median"]]
         spread = f"median range {min(medians):,.0f}-{max(medians):,.0f}" if len(medians) > 1 else ""
         print(f"  {case['id']:<22} {sum(r['passed'] for r in rs)}/{len(rs)} passed  "
-              f"avg {statistics.mean(r['seconds'] for r in rs):.0f}s  {spread}")
+              f"avg {statistics.mean(r['seconds'] for r in rs):.0f}s  "
+              f"avg {statistics.mean(r.get('input_tokens', 0) for r in rs):,.0f} in / "
+              f"{statistics.mean(r.get('output_tokens', 0) for r in rs):,.0f} out tokens  {spread}")
     for d in det:
         print(f"  {d['case']:<60} {'PASS' if d['passed'] else 'FAIL'}")
     print(f"\nRaw results: {out}")
