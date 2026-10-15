@@ -54,7 +54,7 @@ def cost(usage):
 async def run_package(graph, case, model):
     """A whole bid package: per-bidder assessments from the shared bands, judged from the run as recorded
     (a replay of its steps), and nothing saved or ranked."""
-    usage = agent.Usage()
+    usage = agent.Usage(model)
     base = server.review_request(case.get("currency"), case["year"], case.get("country", "NG"))
     run_id = None
     start = time.perf_counter()
@@ -85,7 +85,7 @@ async def run_package(graph, case, model):
 async def run_case(graph, tools, case, model):
     if "package" in case:
         return await run_package(graph, case, model)
-    usage, run_id = agent.Usage(), None
+    usage, run_id = agent.Usage(model), None
     start = time.perf_counter()
     try:  # a crash is a failed run, not a reason to stop the suite
         started = agent.as_json(agent.tool_text(await tools["start_review"].ainvoke(

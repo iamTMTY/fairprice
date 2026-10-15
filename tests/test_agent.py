@@ -326,10 +326,11 @@ def test_usage_counts_calls_tokens_time_and_fees(monkeypatch):
     assert usage.line().endswith("($0.01 saved)") and usage.summary()["priced_as"] == "your price"
     monkeypatch.delenv("FAIRPRICE_PRICE_PER_MILLION_INPUT_TOKENS")
     monkeypatch.delenv("FAIRPRICE_PRICE_PER_MILLION_OUTPUT_TOKENS")
-    monkeypatch.setattr(agent, "MODEL", "openai:gpt-4o-mini")  # an API model: the fee itself
+    usage.model = "openai:gpt-4o-mini"  # an API model: the fee itself
     assert usage.line().endswith("API fees $0.00069") and usage.summary()["api_fees"] == 0.00069
-    monkeypatch.setattr(agent, "MODEL", "anthropic:unknown")
+    usage.model = "anthropic:unknown"
     assert usage.line().endswith("API fees not calculated (no price found for this model)")
+    assert agent.Usage("openai:gpt-4o-mini").summary()["model"] == "openai:gpt-4o-mini"  # priced as the model that ran
 
 
 class Reply:

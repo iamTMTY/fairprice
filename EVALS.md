@@ -62,6 +62,37 @@ Expected answers come from bands we built by hand from records we read one by on
 
 Qwen3 8B failed differently from Gemma 4: it reached the right verdict on every Hilux run, but let the Prado and Land Cruiser bundles into the band all four times, so the evidence behind the verdict was wrong. On motorcycles it kept only the one record that mentions "125cc". This is why the default model is now Gemma 4.
 
+## The same tasks on a hosted model: Gemma 4 31B on OpenRouter
+
+The local model is the small Gemma 4 that fits on the laptop. To see how much of the remaining failure is the model rather than the design, we ran the same suite on the largest Gemma 4, `google/gemma-4-31b-it`, through OpenRouter (`FAIRPRICE_MODEL=openai:google/gemma-4-31b-it`, `FAIRPRICE_MODEL_URL=https://openrouter.ai/api/v1`). Same code, same tasks, 2 runs each. Only published award data and the synthetic bid package are sent to the provider.
+
+| Task | 31B, second round (latest code) | 31B, first round | Local Gemma 4, round 10 |
+|---|---|---|---|
+| hilux-within | 2/2 | 2/2 | 2/2 |
+| hilux-above | **2/2** (no bundles in the band) | 2/2 | 0/2 (two bundles in the band) |
+| laptop-above | 2/2 | 2/2 | 2/2 |
+| laptop-within | 2/2 | 2/2 | 2/2 |
+| motorcycle-within | 1/2 | 2/2 | 0/2 |
+| aircon-traps | 2/2 | 2/2 | 2/2 |
+| no-benchmark | 2/2 | 0/2 (an eval bug, below) | 2/2 |
+| kenya-no-quantities | 2/2 | 0/2 (an eval bug, below) | 2/2 |
+| placeholder-dates | 2/2 | 2/2 | 2/2 |
+| **Single items** | **17/18** | 14/18 as scored (18/18 without the eval bug) | 14/18 |
+| bid-package | 1/2 (its motorcycle line) | 2/2 | 2/2 |
+| Average time per single item | 41 s | 40 s | 102 s |
+| Average time per bid package | 119 s | 114 s | 620 s |
+| Cost of a whole round (20 runs) | $0.18 | $0.17 | $0.00 (the same tokens on the hosted 26B: $0.08) |
+
+Results: `20261015-1041-openai_google_gemma-4-31b-it.jsonl` (second round) and `20261015-1002-openai_google_gemma-4-31b-it.jsonl` (first). Costs are worked out from each run's tokens at OpenRouter's prices of 15 October 2026 ($0.20 per million input tokens, $0.40 per million output); the eval runner recorded $0 for these rounds because it priced runs as the default local model, which is fixed.
+
+**What the larger model fixes.** Both failures the local model never shook: the Hilux band no longer keeps the Hilux-and-Prado convoy bundles ("Bundle of Hilux and Land Cruiser Prado" is now its own rejection reason), and motorcycles are mostly kept although they do not state "125cc". It is also 2.5 times faster per item and 5 times faster per bid package than the laptop.
+
+**What it found.** In the first round, for the MRI scanner and the Kenyan task, the 31B rejected every record its searches found, each with a reason, and sent the price check an empty list of comparable records. Our tool refused an empty list, so the right conclusion, "no benchmark exists", could not be recorded and the line ended `unresolved`. Both tasks accept `unresolved`, so those runs were right; they were scored as failures by a second bug, in the eval runner, which compared unresolved lines as if they were price checks. Both bugs are fixed: the check now records "insufficient comparables: 0 accepted" with every rejection's reason, and the replay comparison only applies to price checks. The local model never hit this because it always kept a record or two.
+
+**What still fails.** The motorcycle line, once in `motorcycle-within` and once in the bid package: the 31B kept 3 records, two short of a band. It is the same judgement as the local model's (rejecting records that do not state the engine size), less often.
+
+**What it would mean for a buyer.** About a cent per item and two to three cents per bid package, in exchange for sending published award data (never bid prices, in this eval) to a provider. With real bids, the bid prices go to the provider too, which a buyer's procurement and data rules must allow. The local model costs nothing and sends nothing, and is the default.
+
 ## Cost per run (measured)
 
 Every run records what it cost (model calls, tokens, model time, and API fees when prices are set); `uv run fairprice --audit <run id>` shows it, and so does the report's JSON. Measured in round 10 (`20261013-0941-ollama_gemma4.jsonl`, average of 2 runs per task, Gemma 4 on Ollama, MacBook Apple M5 16 GB):

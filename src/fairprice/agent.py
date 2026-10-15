@@ -565,7 +565,8 @@ def check_setup():
 class Usage(BaseCallbackHandler):
     """What a run cost: model calls, tokens, model time and, if prices are set, API fees."""
 
-    def __init__(self):
+    def __init__(self, model=None):
+        self.model = model or MODEL  # the model that ran, which is what the run is priced as
         self.calls = self.input_tokens = self.output_tokens = 0
         self.seconds, self.started = 0.0, {}
 
@@ -584,9 +585,9 @@ class Usage(BaseCallbackHandler):
     def summary(self):
         """The run's cost. hosted_cost is what its tokens cost on a hosted API: the fee for an API model, and the
         saving for a local one."""
-        price, local = prices.price(MODEL), prices.is_local(MODEL)
+        price, local = prices.price(self.model), prices.is_local(self.model)
         hosted = round(self.input_tokens * price[0] + self.output_tokens * price[1], 6) if price else None
-        return {"model": MODEL, "model_calls": self.calls, "input_tokens": self.input_tokens,
+        return {"model": self.model, "model_calls": self.calls, "input_tokens": self.input_tokens,
                 "output_tokens": self.output_tokens, "model_seconds": round(self.seconds, 1), "local_model": local,
                 "api_fees": 0.0 if local else hosted, "hosted_cost": hosted, "priced_as": price[2] if price else None,
                 "currency": "USD"}
