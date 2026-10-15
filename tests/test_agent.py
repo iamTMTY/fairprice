@@ -56,6 +56,9 @@ def test_bound_tools_hide_the_run_from_the_model():
             run = server.start_review("Laptop computer", 2e6, year=2025)["run_id"]
             search = agent.bound(tools["find_comparables"], run, "1")
             assert "run_id" not in search.args and "line" not in search.args and "keywords" in search.args
+            assert "year_from" not in search.args and "year_to" not in search.args  # every year is comparable
+            narrowed = json.loads(await search.ainvoke({"keywords": ["laptop"], "year_from": 2026, "year_to": 2026}))
+            assert narrowed["total_matches"] >= 2  # a year limit the model sends anyway is dropped
             return json.loads(await search.ainvoke({"keywords": ["laptop"]})), run
     found, run = asyncio.run(go())
     assert found["total_matches"] >= 2 and server.review(run)[0].id == run

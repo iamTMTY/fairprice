@@ -79,7 +79,8 @@ Steps:
 1. Call plan_searches first. List the keyword sets you will try, most specific first, each built on the word
    that names the product's model or kind (for example [["hilux"], ["hilux", "pickup"], ["pickup", "4x4"]]),
    and say in notes what you will reject. A keyword matches its words in any order.
-2. Call find_comparables with the first set in your plan.
+2. Call find_comparables with the first set in your plan. Searches cover every year: past prices are adjusted
+   for inflation to {year}, so older purchases are comparable.
 3. Read the results. Keep only records for the SAME kind of product at a comparable specification.
    Reject a record, with a short reason, if it is a different product, a bundle of mixed items,
    or a lot price (quantity 1 but the description says several units, a project, or installation works).
@@ -225,14 +226,19 @@ def unfinished(messages):
     return None
 
 
-def bound(tool, run_id, line):
-    """One of our MCP tools with run_id and line filled in by code, so the model never handles them."""
-    schema = tool.args_schema if isinstance(tool.args_schema, dict) else tool.args_schema.model_json_schema()
-    schema = {**schema, "properties": {k: v for k, v in schema.get("properties", {}).items() if k not in ("run_id", "line")},
-              "required": [r for r in schema.get("required", []) if r not in ("run_id", "line")]}
+HIDDEN = ("run_id", "line", "year_from", "year_to")  # filled in by code, or not the Analyst's to set
 
-    async def call(**kwargs):
-        return await tool.ainvoke({**kwargs, "run_id": run_id, "line": line})
+
+def bound(tool, run_id, line):
+    """One of our MCP tools with run_id and line filled in by code, so the model never handles them. The search's
+    year limits are left out too: past prices are adjusted for inflation, so every year is comparable, and a model
+    that narrowed its searches to the year under review found too few records to judge a price."""
+    schema = tool.args_schema if isinstance(tool.args_schema, dict) else tool.args_schema.model_json_schema()
+    allowed = {k: v for k, v in schema.get("properties", {}).items() if k not in HIDDEN}
+    schema = {**schema, "properties": allowed, "required": [r for r in schema.get("required", []) if r in allowed]}
+
+    async def call(**kwargs):  # an argument the schema does not offer is dropped, not passed on
+        return await tool.ainvoke({**{k: v for k, v in kwargs.items() if k in allowed}, "run_id": run_id, "line": line})
     return StructuredTool(name=tool.name, description=tool.description, args_schema=schema, coroutine=call)
 
 
