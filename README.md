@@ -83,7 +83,7 @@ Three things to set on the server itself:
 
 `--check` also sends one long test prompt to see whether the server reads it whole; a server that silently cuts long conversations makes the agent lose its own search results and repeat the same search.
 
-**What we tested.** We ran this route against Ollama's own OpenAI-compatible endpoint (`FAIRPRICE_MODEL_URL=http://localhost:11434/v1`), which serves the same Gemma 4:
+**What we tested.** We ran this route against Ollama's own OpenAI-compatible endpoint (`FAIRPRICE_MODEL_URL=http://localhost:11434/v1`), which serves the same Gemma 4 8B:
 
 - With Ollama's default context window, the server cut each conversation to about 800 tokens, and Gemma repeated the same search 15 times without ever checking a price. That is why `--check` now tests the context window.
 - With a 16,384-token window (a Modelfile with `PARAMETER num_ctx 16384`), the run worked: it searched, built a band and reached the approval gate in 5 model calls. But this route cannot switch Gemma's thinking off, so it wrote about 6,900 output tokens instead of about 1,000 and took 6 minutes instead of under 2.
@@ -161,7 +161,7 @@ Each item takes about 2 minutes on the laptop above.
 Cost of this run: 34 model calls, 131,498 input and 7,356 output tokens, 457 s of model time, API fees $0.00 (local model)($0.01 saved)
 ```
 
-With a local model there are no API fees; the amount saved is what the same tokens would cost on the closest hosted model (for Ollama's `gemma4`, the smallest Gemma 4 on OpenRouter). With an API model the line shows the fee instead: `API fees $0.01`. Prices come from OpenRouter's public price list (no key needed), cached in `data/model-prices.json` and refreshed weekly. To use your own price instead (a negotiated rate), set `FAIRPRICE_PRICE_PER_MILLION_INPUT_TOKENS` and `…_OUTPUT_TOKENS` in US dollars. The same figures, and which model they were priced as, are stored with the report (in its JSON, under `report.cost`) and in the audit log (`uv run fairprice --audit <run id>`). EVALS.md gives measured tokens per run for each eval task.
+With a local model there are no API fees; the amount saved is what the same tokens would cost on the closest hosted model (for Gemma 4 8B on Ollama, the smallest Gemma 4 on OpenRouter, Gemma 4 26B). With an API model the line shows the fee instead: `API fees $0.01`. Prices come from OpenRouter's public price list (no key needed), cached in `data/model-prices.json` and refreshed weekly. To use your own price instead (a negotiated rate), set `FAIRPRICE_PRICE_PER_MILLION_INPUT_TOKENS` and `…_OUTPUT_TOKENS` in US dollars. The same figures, and which model they were priced as, are stored with the report (in its JSON, under `report.cost`) and in the audit log (`uv run fairprice --audit <run id>`). EVALS.md gives measured tokens per run for each eval task.
 
 At the end, a short summary is printed. You pick a decision with the arrow keys and Enter, or by pressing 1, 2 or 3:
 
@@ -447,7 +447,7 @@ Every exclusion is listed in the report's Sources sheet with its reason, so a co
 
 ## Honest status
 
-- Works end to end on real data with Gemma 4 run locally (default), and with Qwen3 8B.
+- Works end to end on real data with Gemma 4 8B run locally (default), Qwen3 8B, and Gemma 4 31B on OpenRouter.
 - Small open models still make mistakes, such as searching with keywords that are too broad. The self-check catches some of these; EVALS.md shows what remains.
 - Countries are loaded by code (`fairprice-ingest --add NG`). Rwanda has also been tested, but the evals cover Nigeria and Kenya only.
 - Item matching uses keywords, not a product classification. This is the biggest limit on accuracy, and long BoQ descriptions make it worse.
